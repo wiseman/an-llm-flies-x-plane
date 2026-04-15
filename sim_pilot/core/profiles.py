@@ -667,41 +667,45 @@ class PatternFlyProfile:
                 throttle_limit = (0.2, 0.55)
                 flaps_cmd = 10
             elif phase is FlightPhase.BASE:
-                # Target the glidepath altitude at the END of the base
-                # leg. This commands TECS to descend from pattern
-                # altitude to the 3° slope intercept so that BASE →
-                # FINAL hands off near the glidepath. The old behavior
-                # held a flat 600 AGL, which left the aircraft far
-                # above the glidepath at final intercept and caused
-                # long floats before touchdown (observed on KWHP 4120
-                # ft runway: touchdown ~3000 ft past the threshold).
-                base_end_runway = self.runway_frame.to_runway_frame(
-                    self.pattern.base_leg.end_ft
-                )
-                target_altitude_ft = glidepath_target_altitude_ft(
-                    self.runway_frame,
-                    runway_x_ft=base_end_runway.x,
-                    field_elevation_ft=self.config.airport.field_elevation_ft,
-                )
+                # Achievable BASE target: 400 ft AGL. This is a realistic
+                # altitude for a C172 to reach during a single base leg
+                # from pattern altitude, and leaves the final intercept
+                # only ~100 ft above a 4° glidepath so TECS can capture
+                # with the small remaining error. Using the glidepath
+                # altitude at base_end as the target was too aggressive
+                # (required ~1200 fpm descent, which a C172 with gear +
+                # flaps 20 cannot sustain).
+                target_altitude_ft = self.config.airport.field_elevation_ft + 400.0
                 target_speed_kt = self.config.performance.base_speed_kt
                 vertical_mode = VerticalMode.TECS
                 glidepath = None
-                throttle_limit = (0.1, 0.5)
+                throttle_limit = (0.05, 0.5)
                 flaps_cmd = 20
             else:
+                # 4° final approach slope — steeper than the 3° ILS
+                # standard because short-field visual approaches fly
+                # steeper, and because at 3° a C172 can't catch the
+                # glidepath from above within the available final leg
+                # length (~4500 ft for a standard pattern). With the
+                # aim point at ground level the threshold crossing
+                # height falls out as aim_x * tan(4°) ≈ 70 AGL for a
+                # 1000 ft aim point — which matches the "over the
+                # numbers at ~70 ft" visual technique.
+                final_slope_deg = 4.0
                 target_altitude_ft = glidepath_target_altitude_ft(
                     self.runway_frame,
                     runway_x_ft=state.runway_x_ft or -3000.0,
                     field_elevation_ft=self.config.airport.field_elevation_ft,
+                    slope_deg=final_slope_deg,
                 )
                 target_speed_kt = self.config.performance.final_speed_kt
                 vertical_mode = VerticalMode.GLIDEPATH_TRACK
                 glidepath = Glidepath(
-                    slope_deg=3.0,
-                    threshold_crossing_height_ft=50.0,
+                    slope_deg=final_slope_deg,
+                    threshold_crossing_height_ft=0.0,
                     aimpoint_ft_from_threshold=self.runway_frame.touchdown_runway_x_ft,
                 )
-                throttle_limit = (0.1, 0.65)
+                throttle_limit = (0.05, 0.65)
                 flaps_cmd = 30
             # Climb-capture for PATTERN_ENTRY/DOWNWIND: if the LLM
             # re-engaged pattern_fly from well below pattern altitude

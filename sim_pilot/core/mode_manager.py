@@ -82,15 +82,17 @@ class ModeManager:
                 return FlightPhase.ENROUTE_CLIMB
             return phase
         if phase is FlightPhase.CROSSWIND:
-            # Turn downwind when we've both captured the crosswind heading
-            # AND reached the full downwind offset. Requiring heading-
-            # captured prevents the old bug where the 80%-offset check
-            # fired while the plane was still in the middle of its turn
-            # from upwind to crosswind, so the downwind leg started with
-            # 100° of remaining turn and L1 had to drag the plane around
-            # at a shallow bank while altitude sagged below pattern
-            # altitude (observed in sim_pilot-20260415-130505.log: the
-            # plane rolled out on downwind at 700 AGL instead of 1000).
+            # Turn downwind once heading is captured AND we've reached
+            # ~75% of the downwind offset. 75% gives L1 room to
+            # anticipate the 90° turn: at 20° bank / 65 kt the turn
+            # radius is ~1000 ft, so starting the transition at 75%
+            # (~2625 ft off centerline for a 3500 ft pattern) lets the
+            # turn arc roll the aircraft out right on the downwind
+            # line. Firing at 100% left the aircraft ~1000 ft past the
+            # line and forced L1 to correct inward. The heading-
+            # captured check (within 15° of course ± 90°) still
+            # prevents a premature trigger while the upwind→crosswind
+            # turn is still in progress.
             if state.runway_y_ft is None:
                 return phase
             downwind_offset_ft = abs(pattern.downwind_y_ft)
@@ -99,7 +101,7 @@ class ModeManager:
             crosswind_course_deg = (runway_course_deg + side_sign * 90.0) % 360.0
             heading_error_deg = abs(wrap_degrees_180(state.track_deg - crosswind_course_deg))
             heading_captured = heading_error_deg <= 15.0
-            at_offset = abs(state.runway_y_ft) >= downwind_offset_ft
+            at_offset = abs(state.runway_y_ft) >= downwind_offset_ft * 0.75
             if heading_captured and at_offset:
                 return FlightPhase.DOWNWIND
             return phase

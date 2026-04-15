@@ -57,60 +57,65 @@ class PatternGeometryTests(unittest.TestCase):
 
 
 class GlidepathTargetAltitudeTests(unittest.TestCase):
-    """Regression tests for the glidepath altitude floor.
-
-    The old implementation clamped distance_from_aimpoint at zero once
-    the aircraft was past the aim point, so target altitude froze at
-    field_elev + threshold_crossing_height (≈50 AGL) forever. On a
-    short runway (KWHP, 4120 ft) this trapped the aircraft at 50 AGL
-    over a thousand feet of runway before the roundout trigger fired,
-    and touchdown happened ~3000 ft past the threshold. The fix: keep
-    descending along the 3° slope past the aim point, clamped at
-    ground level."""
+    """Regression tests for the glidepath altitude math. The aim point
+    is at ground level by default (aim_point_height_agl_ft=0), and the
+    glidepath rises along the slope going backward from the aim point.
+    Past the aim point the target continues down toward ground, clamped
+    at field elevation."""
 
     def setUp(self) -> None:
         self.config = load_default_config_bundle()
         self.runway_frame = RunwayFrame(self.config.airport.runway)
         self.field_elev_ft = self.config.airport.field_elevation_ft
 
-    def test_altitude_at_aim_point_equals_threshold_crossing_height(self) -> None:
+    def test_altitude_at_aim_point_is_ground_level_by_default(self) -> None:
         aim_x = self.runway_frame.touchdown_runway_x_ft
         target = glidepath_target_altitude_ft(
             self.runway_frame,
             runway_x_ft=aim_x,
             field_elevation_ft=self.field_elev_ft,
         )
-        self.assertAlmostEqual(target - self.field_elev_ft, 50.0)
+        self.assertAlmostEqual(target, self.field_elev_ft)
 
     def test_altitude_rises_before_the_aim_point(self) -> None:
         aim_x = self.runway_frame.touchdown_runway_x_ft
-        # 2000 ft before the aim point at 3° slope = 104.7 ft above the
-        # aim-point altitude = 154.7 ft AGL.
+        # 2000 ft before the aim point at 3° slope = 2000 * tan(3°)
+        # ≈ 104.7 ft above the aim-point altitude (ground level).
         target = glidepath_target_altitude_ft(
             self.runway_frame,
             runway_x_ft=aim_x - 2000.0,
             field_elevation_ft=self.field_elev_ft,
         )
-        self.assertAlmostEqual(target - self.field_elev_ft, 50.0 + 2000.0 * 3.0 / 57.2958, places=1)
+        self.assertAlmostEqual(
+            target - self.field_elev_ft, 2000.0 * 3.0 / 57.2958, places=1
+        )
+
+    def test_threshold_crossing_height_is_implicit(self) -> None:
+        # With the aim 1000 ft past the threshold and a 3° slope, the
+        # threshold crossing height falls out as 1000 * tan(3°) ≈ 52 ft
+        # AGL — this is what a standard visual approach profile looks
+        # like.
+        aim_x = self.runway_frame.touchdown_runway_x_ft
+        target = glidepath_target_altitude_ft(
+            self.runway_frame,
+            runway_x_ft=0.0,
+            field_elevation_ft=self.field_elev_ft,
+        )
+        expected_tch_ft = aim_x * 3.0 / 57.2958
+        self.assertAlmostEqual(target - self.field_elev_ft, expected_tch_ft, places=1)
 
     def test_altitude_descends_past_the_aim_point(self) -> None:
-        # Past the aim point the target must continue to decrease, not
-        # freeze at 50 AGL. Regression for the KWHP "long landing" bug.
         aim_x = self.runway_frame.touchdown_runway_x_ft
         target_400_past = glidepath_target_altitude_ft(
             self.runway_frame,
             runway_x_ft=aim_x + 400.0,
             field_elevation_ft=self.field_elev_ft,
         )
-        self.assertLess(target_400_past - self.field_elev_ft, 50.0)
-        # At 3° slope the altitude drops by 400 * tan(3°) ≈ 21 ft below
-        # the aim-point altitude, so 50 - 21 = 29 AGL.
-        self.assertAlmostEqual(target_400_past - self.field_elev_ft, 50.0 - 400.0 * 3.0 / 57.2958, places=1)
+        # 400 ft past the aim point would mathematically be 21 ft
+        # below ground; the formula clamps at field elevation.
+        self.assertAlmostEqual(target_400_past, self.field_elev_ft)
 
     def test_altitude_clamps_at_ground_level(self) -> None:
-        # Far past the aim point the formula would go below ground — it
-        # must clamp at field elevation, not command a subterranean
-        # altitude to TECS.
         aim_x = self.runway_frame.touchdown_runway_x_ft
         target = glidepath_target_altitude_ft(
             self.runway_frame,
@@ -118,6 +123,18 @@ class GlidepathTargetAltitudeTests(unittest.TestCase):
             field_elevation_ft=self.field_elev_ft,
         )
         self.assertAlmostEqual(target, self.field_elev_ft)
+
+    def test_non_zero_aim_point_height_adds_offset(self) -> None:
+        # An instrument-style approach with a 50 ft aim-point height
+        # lifts the whole glidepath by 50 ft.
+        aim_x = self.runway_frame.touchdown_runway_x_ft
+        target = glidepath_target_altitude_ft(
+            self.runway_frame,
+            runway_x_ft=aim_x,
+            field_elevation_ft=self.field_elev_ft,
+            aim_point_height_agl_ft=50.0,
+        )
+        self.assertAlmostEqual(target - self.field_elev_ft, 50.0)
 
 
 if __name__ == "__main__":

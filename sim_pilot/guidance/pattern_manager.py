@@ -110,24 +110,28 @@ def glidepath_target_altitude_ft(
     runway_x_ft: float,
     field_elevation_ft: float,
     slope_deg: float = 3.0,
-    threshold_crossing_height_ft: float = 50.0,
+    aim_point_height_agl_ft: float = 0.0,
 ) -> float:
     """Target altitude for a point on (or near) the runway.
 
-    The glidepath is a 3° slope through ``touchdown_runway_x_ft`` at
-    ``threshold_crossing_height_ft`` AGL. Before the aim point the target
-    climbs upward along the slope; past the aim point it continues DOWN
-    along the same slope toward the runway surface. The old implementation
-    clamped distance to zero past the aim point, so target alt froze at
-    the threshold crossing height (≈50 AGL) forever — which trapped the
-    aircraft at 50 ft for hundreds or thousands of feet while it waited
-    for the roundout trigger (observed in sim_pilot-20260415-110742.log:
-    touchdown at runway_x≈3000 ft on a 4120 ft runway). We now let the
-    glidepath drive the aircraft toward ground level so the roundout
-    trigger (alt_agl ≤ flare.roundout_height_ft) fires close to the aim
-    point and touchdown lands near the aim point.
+    The glidepath is a ``slope_deg`` slope that passes through the
+    aim point (``runway_frame.touchdown_runway_x_ft``) at
+    ``aim_point_height_agl_ft`` above field elevation. Before the aim
+    point the target rises along the slope; past the aim point it
+    continues down toward ground, clamped at field elevation so we
+    never command a subterranean altitude.
+
+    For a 3° glide with ``aim_point_height_agl_ft=0`` and the aim
+    1000 ft past the threshold, the threshold crossing height falls
+    out as 1000 * tan(3°) ≈ 52 ft AGL — matching a standard visual
+    approach. The old parameter name was ``threshold_crossing_height_ft``
+    but was actually the aim-point altitude (not the threshold
+    crossing height), so a default of 50 there meant the aircraft
+    was commanded to cross the threshold at ~102 AGL and touch down
+    at 50 AGL — which trapped it floating high for most of the
+    runway before the roundout trigger fired.
     """
     slope_rad = clamp(slope_deg / 57.2958, 0.0, 0.2)
     distance_to_aimpoint_ft = runway_frame.touchdown_runway_x_ft - runway_x_ft
-    path_height_ft = threshold_crossing_height_ft + (distance_to_aimpoint_ft * slope_rad)
+    path_height_ft = aim_point_height_agl_ft + (distance_to_aimpoint_ft * slope_rad)
     return field_elevation_ft + max(0.0, path_height_ft)
