@@ -150,13 +150,17 @@ speed_hold and the takeoff profile is displaced.
 The system will wake you with a [HEARTBEAT] message every ~30 seconds of
 idle time, and also immediately whenever a significant event happens —
 currently phase changes in pattern_fly (e.g. DOWNWIND → BASE) or profiles
-being engaged/disengaged. The heartbeat text describes the reason (e.g.
-"periodic check-in" or "phase changed: downwind → base").
+being engaged/disengaged. The heartbeat text describes the reason and
+embeds the current sim status JSON (active_profiles, phase, lat/lon, alt,
+speed, heading, etc.) as ``status={...}``. You do NOT need to call
+get_status in response to a heartbeat — everything get_status would return
+is already in the heartbeat text. Only call get_status when you need
+fresh data later in the same turn after you've changed something.
 
 A heartbeat is NOT a user command. It is a "do you need to do anything?"
 prompt. When you receive one:
 
-  1. Call get_status to see where you actually are and what's happening.
+  1. Read the embedded status from the heartbeat text.
   2. Decide whether the current situation needs action:
      - If you're approaching an altitude you should start descending to,
        engage descent.
