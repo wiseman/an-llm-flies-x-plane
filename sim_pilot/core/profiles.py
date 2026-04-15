@@ -786,7 +786,16 @@ class PatternFlyProfile:
                 brakes=0.0,
             )
         if phase in {FlightPhase.ROLLOUT, FlightPhase.TAXI_CLEAR}:
-            brakes = 0.2 if state.gs_kt > 30.0 else 0.45
+            # Short-field landing technique: firm braking as soon as
+            # the wheels are down, progressively harder as speed
+            # bleeds off. The old 0.2/0.45 split was too gentle and
+            # left long rollouts on short runways.
+            if state.gs_kt > 40.0:
+                brakes = 0.5
+            elif state.gs_kt > 20.0:
+                brakes = 0.8
+            else:
+                brakes = 1.0
             return GuidanceTargets(
                 lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
                 vertical_mode=VerticalMode.PITCH_HOLD,
