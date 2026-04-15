@@ -107,6 +107,38 @@ class ModeTransitionTests(unittest.TestCase):
         )
         self.assertEqual(phase, FlightPhase.FLARE)
 
+    def test_slow_downwind_can_turn_base_soon_after_abeam(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.DOWNWIND,
+            make_state(
+                runway_x_ft=500.0,
+                runway_y_ft=self.pattern.downwind_y_ft,
+                threshold_abeam=True,
+                gs_kt=35.0,
+                ias_kt=65.0,
+            ),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.BASE)
+
+    def test_normal_speed_downwind_does_not_turn_base_at_abeam(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.DOWNWIND,
+            make_state(
+                runway_x_ft=500.0,
+                runway_y_ft=self.pattern.downwind_y_ft,
+                threshold_abeam=True,
+                gs_kt=80.0,
+                ias_kt=80.0,
+            ),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.DOWNWIND)
+
 
 if __name__ == "__main__":
     unittest.main()

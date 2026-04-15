@@ -5,7 +5,9 @@ vy_kt: 74
 cruise_altitude_ft: 3000
 cruise_speed_kt: 95
 descent_speed_kt: 85
-pattern_speed_kt: 85
+downwind_speed_kt: 80
+base_speed_kt: 70
+final_speed_kt: 65
 vapp_kt: 65
 vref_kt: 61
 vso_landing_kt: 48

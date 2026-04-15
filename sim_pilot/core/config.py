@@ -74,7 +74,9 @@ class PerformanceConfig:
     cruise_altitude_ft: float
     cruise_speed_kt: float
     descent_speed_kt: float
-    pattern_speed_kt: float
+    downwind_speed_kt: float
+    base_speed_kt: float
+    final_speed_kt: float
     vapp_kt: float
     vref_kt: float
     vso_landing_kt: float
@@ -175,7 +177,9 @@ def load_default_config_bundle() -> ConfigBundle:
         cruise_altitude_ft=float(aircraft_data["cruise_altitude_ft"]),
         cruise_speed_kt=float(aircraft_data["cruise_speed_kt"]),
         descent_speed_kt=float(aircraft_data["descent_speed_kt"]),
-        pattern_speed_kt=float(aircraft_data["pattern_speed_kt"]),
+        downwind_speed_kt=float(aircraft_data["downwind_speed_kt"]),
+        base_speed_kt=float(aircraft_data["base_speed_kt"]),
+        final_speed_kt=float(aircraft_data["final_speed_kt"]),
         vapp_kt=float(aircraft_data["vapp_kt"]),
         vref_kt=float(aircraft_data["vref_kt"]),
         vso_landing_kt=float(aircraft_data["vso_landing_kt"]),

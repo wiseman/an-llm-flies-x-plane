@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Deterministic milestone 1 X-Plane pilot core"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "websockets>=13.0",
+]
 
 [project.scripts]
 sim-pilot = "sim_pilot.__main__:main"

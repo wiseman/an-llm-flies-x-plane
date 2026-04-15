@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sim_pilot.core.config import ConfigBundle
 from sim_pilot.core.safety_monitor import SafetyStatus
+from sim_pilot.core.types import clamp
 from sim_pilot.core.types import AircraftState, FlightPhase
 from sim_pilot.guidance.pattern_manager import PatternGeometry
 from sim_pilot.guidance.route_manager import RouteManager
@@ -20,8 +21,11 @@ class ModeManager:
         route_manager: RouteManager,
         pattern: PatternGeometry,
         safety_status: SafetyStatus,
+        *,
+        turn_base_now: bool = False,
+        force_go_around: bool = False,
     ) -> FlightPhase:
-        if safety_status.request_go_around:
+        if force_go_around or safety_status.request_go_around:
             return FlightPhase.GO_AROUND
 
         if phase is FlightPhase.PREFLIGHT:
@@ -63,7 +67,7 @@ class ModeManager:
                     return FlightPhase.DOWNWIND
             return phase
         if phase is FlightPhase.DOWNWIND:
-            if pattern.base_turn_ready(state.runway_x_ft):
+            if turn_base_now or self._downwind_base_turn_ready(state, pattern):
                 return FlightPhase.BASE
             return phase
         if phase is FlightPhase.BASE:
@@ -90,3 +94,17 @@ class ModeManager:
             if state.alt_agl_ft >= 400.0:
                 return FlightPhase.ENROUTE_CLIMB
         return phase
+
+    def _downwind_base_turn_ready(self, state: AircraftState, pattern: PatternGeometry) -> bool:
+        if state.runway_x_ft is None:
+            return False
+
+        nominal_turn_x_ft = pattern.base_turn_x_ft
+        groundspeed_relief_ft = clamp(
+            (self.config.performance.downwind_speed_kt - state.gs_kt) * 140.0,
+            0.0,
+            abs(pattern.base_turn_x_ft) + self.config.pattern.abeam_window_ft,
+        )
+        earliest_turn_x_ft = self.config.pattern.abeam_window_ft
+        adaptive_turn_x_ft = min(earliest_turn_x_ft, nominal_turn_x_ft + groundspeed_relief_ft)
+        return state.runway_x_ft <= adaptive_turn_x_ft

@@ -5,9 +5,29 @@ import dataclasses
 
 from sim_pilot.core.config import ConfigBundle
 from sim_pilot.core.mission_manager import PilotCore
+from sim_pilot.core.profiles import PatternFlyProfile
 from sim_pilot.core.types import FlightPhase, Vec2
 from sim_pilot.guidance.runway_geometry import RunwayFrame
 from sim_pilot.sim.simple_dynamics import SimpleAircraftModel
+
+
+@dataclass(slots=True, frozen=True)
+class ScenarioLogRow:
+    time_s: float
+    phase: FlightPhase
+    position_x_ft: float
+    position_y_ft: float
+    runway_x_ft: float
+    runway_y_ft: float
+    pitch_deg: float
+    altitude_msl_ft: float
+    altitude_agl_ft: float
+    throttle_pos: float
+    throttle_cmd: float
+    ias_kt: float
+    gs_kt: float
+    heading_deg: float
+    bank_deg: float
 
 
 @dataclass(slots=True)
@@ -20,7 +40,7 @@ class ScenarioResult:
     touchdown_sink_fpm: float | None
     max_final_bank_deg: float
     phases_seen: tuple[FlightPhase, ...]
-    history: tuple[object, ...] = field(default_factory=tuple)
+    history: tuple[ScenarioLogRow, ...] = field(default_factory=tuple)
 
 
 @dataclass(slots=True)
@@ -28,15 +48,16 @@ class ScenarioRunner:
     config: ConfigBundle
     wind_vector_kt: Vec2 = field(default_factory=lambda: Vec2(0.0, 0.0))
     dt: float = 0.2
-    max_time_s: float = 1800.0
+    max_time_s: float = 5400.0
 
     def run(self) -> ScenarioResult:
         model = SimpleAircraftModel(self.config, self.wind_vector_kt)
         pilot = PilotCore(self.config)
         runway_frame = RunwayFrame(self.config.airport.runway)
+        pilot.engage_profile(PatternFlyProfile(self.config, runway_frame))
         raw_state = model.initial_state()
 
-        history: list[object] = []
+        history: list[ScenarioLogRow] = []
         phases_seen: list[FlightPhase] = []
         touchdown_runway_x_ft: float | None = None
         touchdown_centerline_ft: float | None = None
@@ -46,7 +67,25 @@ class ScenarioRunner:
 
         while raw_state.time_s <= self.max_time_s:
             estimated_state, commands = pilot.update(raw_state, self.dt)
-            history.append(estimated_state)
+            history.append(
+                ScenarioLogRow(
+                    time_s=estimated_state.t_sim,
+                    phase=pilot.phase,
+                    position_x_ft=estimated_state.position_ft.x,
+                    position_y_ft=estimated_state.position_ft.y,
+                    runway_x_ft=0.0 if estimated_state.runway_x_ft is None else estimated_state.runway_x_ft,
+                    runway_y_ft=0.0 if estimated_state.runway_y_ft is None else estimated_state.runway_y_ft,
+                    pitch_deg=estimated_state.pitch_deg,
+                    altitude_msl_ft=estimated_state.alt_msl_ft,
+                    altitude_agl_ft=estimated_state.alt_agl_ft,
+                    throttle_pos=estimated_state.throttle_pos,
+                    throttle_cmd=commands.throttle,
+                    ias_kt=estimated_state.ias_kt,
+                    gs_kt=estimated_state.gs_kt,
+                    heading_deg=estimated_state.heading_deg,
+                    bank_deg=estimated_state.roll_deg,
+                )
+            )
             if not phases_seen or phases_seen[-1] is not pilot.phase:
                 phases_seen.append(pilot.phase)
             if pilot.phase in {FlightPhase.FINAL, FlightPhase.ROUNDOUT, FlightPhase.FLARE}:

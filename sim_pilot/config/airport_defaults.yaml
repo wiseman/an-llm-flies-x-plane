@@ -5,7 +5,7 @@ runway:
   course_deg: 0
   threshold_x_ft: 0
   threshold_y_ft: 0
-  length_ft: 18000
+  length_ft: 21000
   touchdown_zone_ft: 1200
   traffic_side: left
 mission:
