@@ -598,17 +598,11 @@ class PatternFlyProfile:
             leg = self.pattern.leg_for_phase(phase)
             assert leg is not None
             if phase is FlightPhase.PATTERN_ENTRY:
-                # Direct-to the downwind join point instead of following
-                # the rigid entry_leg. The old entry_leg started at a
-                # fixed upwind-and-offset point and ran diagonally to the
-                # join point, so an aircraft engaging pattern_fly from
-                # any other position (the KWHP log scenario: LLM engaged
-                # mid-flight from SE of the airport) had to fly AWAY
-                # from the runway to reach the entry_leg start before
-                # it could turn inbound. Direct-to the join point always
-                # produces a sensible inbound bearing regardless of
-                # starting position. Once close enough the mode_manager
-                # transitions to DOWNWIND on its own.
+                # Direct-to the join point rather than following entry_leg
+                # as a rigid leg: an aircraft engaging pattern_fly from an
+                # arbitrary position (mid-flight rejoin) otherwise has to
+                # fly away from the runway to reach the leg start before
+                # turning inbound.
                 join_waypoint = Waypoint(
                     name="pattern_join",
                     position_ft=self.runway_frame.to_world_frame(self.pattern.join_point_runway_ft),

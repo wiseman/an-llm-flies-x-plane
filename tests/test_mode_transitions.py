@@ -503,13 +503,9 @@ class GoAroundHoldsPatternAltitudeTests(unittest.TestCase):
 
 
 class BaseToFinalAlongTrackTests(unittest.TestCase):
-    """Regression tests for BASE → FINAL gating. The base leg is a
-    diagonal, so the aircraft's track during base is ~130° off runway
-    course — we can't gate on "track within 30° of runway course" without
-    locking the aircraft in BASE forever. Instead the guard is: proximity
-    to base_end_ft AND along-track ≥ 70% of the leg length (so the
-    aircraft has actually flown most of the base leg before the
-    transition fires)."""
+    """Regression tests for BASE → FINAL gating. The guard is along-track
+    ≥ 65% of the base leg, which gives L1 room to anticipate the 90°
+    turn onto final without overshooting the extended centerline."""
 
     def setUp(self) -> None:
         self.config = load_default_config_bundle()
@@ -523,9 +519,7 @@ class BaseToFinalAlongTrackTests(unittest.TestCase):
         self.route_manager = RouteManager([])
         self.safe = SafetyStatus(False, None, self.config.limits.max_bank_pattern_deg)
 
-    def test_does_not_transition_when_only_proximity_satisfied(self) -> None:
-        # Aircraft is within Euclidean distance of base_end but near the
-        # START of the base leg (along-track ≈ 0) — must stay in BASE.
+    def test_does_not_transition_at_start_of_base_leg(self) -> None:
         base_start = self.pattern.base_leg.start_ft
         phase = self.mode_manager.update(
             FlightPhase.BASE,
@@ -540,14 +534,10 @@ class BaseToFinalAlongTrackTests(unittest.TestCase):
             self.pattern,
             self.safe,
         )
-        # base_start is ~4600 ft from base_end, well outside the 1400 ft
-        # proximity trigger, so BASE holds regardless of along-track.
         self.assertEqual(phase, FlightPhase.BASE)
 
     def test_transitions_near_end_of_base_leg(self) -> None:
-        # Fly the aircraft to 90% of the way along the base leg — it
-        # should be within proximity AND past the 70% along-track
-        # threshold, so BASE → FINAL fires.
+        # 90% along-track is past the 65% threshold, so BASE → FINAL fires.
         leg = self.pattern.base_leg
         delta = leg.end_ft - leg.start_ft
         near_end = leg.start_ft + delta * 0.9
@@ -557,7 +547,10 @@ class BaseToFinalAlongTrackTests(unittest.TestCase):
                 position_ft=near_end,
                 runway_x_ft=near_end.x,
                 runway_y_ft=near_end.y,
-                track_deg=130.0,  # diagonal base leg course, NOT runway course
+                # Base leg is perpendicular, so tracking along it means
+                # heading runway_course ± 90°. Runway 36 course 0° left
+                # traffic → base course 90° (east).
+                track_deg=90.0,
                 alt_agl_ft=600.0,
             ),
             self.route_manager,

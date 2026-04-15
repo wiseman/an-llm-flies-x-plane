@@ -63,36 +63,20 @@ def build_pattern_geometry(
     side_sign = -1.0 if runway_frame.runway.traffic_side is TrafficSide.LEFT else 1.0
     downwind_y_ft = side_sign * downwind_offset_ft
     join_x_ft = downwind_offset_ft * 1.1
-    # The base turn point sits on the downwind side, one downwind offset
-    # past the approach threshold — i.e. 3500 ft past the threshold for
-    # a standard pattern. This puts the (perpendicular) base leg
-    # endpoint at ``base_turn_x_ft`` and leaves ``|base_turn_x_ft| +
-    # touchdown_aim`` feet of final-leg length. For a ~4500 ft final
-    # the aircraft can descend from base altitude (~300 AGL) to the
-    # flare on a 3° slope with room to spare.
-    #
-    # The old value was -1500, inherited from a diagonal base leg that
-    # extended from (-1500, -downwind_y) to (-4500, 0). When the leg
-    # was made perpendicular, -1500 left the final leg only 2500 ft
-    # long (too short for a 3° descent from pattern altitude); moving
-    # to -3500 restores a proper-length final.
+    # Base turn point: one downwind offset past the approach threshold
+    # on the downwind side. For the default 3500 ft offset that puts
+    # the base leg at runway_x = -3500 and leaves a ~4500 ft final leg,
+    # enough for a 3° descent from pattern altitude to the flare.
     base_turn_x_ft = -(downwind_offset_ft + extension_ft)
     final_start_x_ft = -max(10000.0, downwind_offset_ft * 2.5)
 
     entry_start_runway_ft = Vec2(join_x_ft + downwind_offset_ft, downwind_y_ft + (side_sign * downwind_offset_ft))
     join_point_runway_ft = Vec2(join_x_ft, downwind_y_ft)
     downwind_end_runway_ft = Vec2(base_turn_x_ft, downwind_y_ft)
-    # Perpendicular base leg — stays at constant runway_x, y goes from the
-    # downwind offset back to centerline. The old implementation used a
-    # diagonal (base_turn_x, downwind_y) → (final_intercept_x, 0) that
-    # combined "turn base" and "fly toward final" into a single leg, but
-    # the aircraft's heading during the diagonal was ~130° off runway
-    # course throughout, so when BASE → FINAL fired the aircraft still
-    # had a 130° turn to make onto final and always overshot the
-    # extended centerline (observed in sim_pilot-20260415-130505.log
-    # where the safety monitor triggered a go-around at cle=797 ft).
-    # The perpendicular leg means the aircraft is only 90° off runway
-    # course at base_end, which L1 can capture cleanly.
+    # Perpendicular base leg: constant runway_x, y traverses from the
+    # downwind offset back to centerline. Aircraft exits the leg with
+    # a 90° turn remaining onto runway course, which L1 captures cleanly
+    # on the final leg.
     base_end_runway_ft = Vec2(base_turn_x_ft, 0.0)
 
     entry_leg = StraightLeg(

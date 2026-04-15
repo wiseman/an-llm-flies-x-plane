@@ -132,19 +132,9 @@ class ModeManager:
                 return FlightPhase.BASE
             return phase
         if phase is FlightPhase.BASE:
-            # The base leg is perpendicular to the runway, so the
-            # aircraft's heading during BASE is runway_course ± 90°.
-            # We want to transition to FINAL early enough that L1's
-            # follow of the final leg can execute the 90° turn onto
-            # runway course without overshooting the extended
-            # centerline. For a ~800 ft turn radius at 25° bank, the
-            # turn needs to start ~1 radius before reaching the
-            # centerline — i.e. when the aircraft has traversed ~65%
-            # of the base leg (leaving a 1225 ft "anticipation"
-            # distance for the turn on a 3500 ft base leg). Previously
-            # we used 70% plus a 1400 ft proximity check; the new
-            # along-track threshold is tuned for the perpendicular
-            # leg geometry.
+            # Fire at 65% along-track so L1 has ~1225 ft of anticipation
+            # room to start the 90° turn onto final before reaching the
+            # extended centerline (~1 turn radius at 25° bank / 65 kt).
             if pattern.is_established_on_final(state.runway_x_ft, state.runway_y_ft, state.track_deg):
                 return FlightPhase.FINAL
             leg = pattern.base_leg
@@ -187,12 +177,9 @@ class ModeManager:
         if state.runway_x_ft is None:
             return False
 
-        # Nominal base-turn point is ``pattern.base_turn_x_ft`` (≈ -1500 ft,
-        # i.e. 1500 ft past the threshold along the downwind direction).
-        # A slow aircraft needs to start the turn earlier so it doesn't
-        # overshoot during base descent. We grow the turn window toward
-        # the abeam-numbers point (``abeam_window_ft``, ≈ 750 ft short of
-        # the threshold end), which becomes the earliest ever turn point.
+        # Grow the turn window toward the abeam-numbers point for slow
+        # aircraft, so they start the turn earlier and don't overshoot
+        # during the base descent.
         nominal_turn_x_ft = pattern.base_turn_x_ft
         earliest_turn_x_ft = self.config.pattern.abeam_window_ft
         speed_shortfall_kt = max(
