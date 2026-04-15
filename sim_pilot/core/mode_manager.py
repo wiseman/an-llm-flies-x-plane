@@ -82,14 +82,25 @@ class ModeManager:
                 return FlightPhase.ENROUTE_CLIMB
             return phase
         if phase is FlightPhase.CROSSWIND:
-            # Turn downwind once we've crossed the downwind offset. For left
-            # traffic downwind_y_ft is negative; for right traffic it's
-            # positive. The test "magnitude of runway_y has reached ≥80% of
-            # the downwind offset" works for either side.
+            # Turn downwind when we've both captured the crosswind heading
+            # AND reached the full downwind offset. Requiring heading-
+            # captured prevents the old bug where the 80%-offset check
+            # fired while the plane was still in the middle of its turn
+            # from upwind to crosswind, so the downwind leg started with
+            # 100° of remaining turn and L1 had to drag the plane around
+            # at a shallow bank while altitude sagged below pattern
+            # altitude (observed in sim_pilot-20260415-130505.log: the
+            # plane rolled out on downwind at 700 AGL instead of 1000).
             if state.runway_y_ft is None:
                 return phase
             downwind_offset_ft = abs(pattern.downwind_y_ft)
-            if abs(state.runway_y_ft) >= downwind_offset_ft * 0.8:
+            runway_course_deg = pattern.runway_frame.runway.course_deg
+            side_sign = -1.0 if pattern.downwind_y_ft < 0.0 else 1.0
+            crosswind_course_deg = (runway_course_deg + side_sign * 90.0) % 360.0
+            heading_error_deg = abs(wrap_degrees_180(state.track_deg - crosswind_course_deg))
+            heading_captured = heading_error_deg <= 15.0
+            at_offset = abs(state.runway_y_ft) >= downwind_offset_ft
+            if heading_captured and at_offset:
                 return FlightPhase.DOWNWIND
             return phase
         if phase is FlightPhase.ENROUTE_CLIMB:
@@ -121,34 +132,28 @@ class ModeManager:
                 return FlightPhase.BASE
             return phase
         if phase is FlightPhase.BASE:
-            # The base leg is a diagonal from the downwind end to the
-            # final-intercept point, so the aircraft's track during base
-            # is NOT close to runway course — it sits ~130° off course
-            # throughout the leg until the L1 follower pulls it onto
-            # final. Previously we transitioned on a pure "≤1400 ft from
-            # base_end" proximity check, which could fire while the
-            # aircraft was still near the start of the base leg (close
-            # in Euclidean distance but not yet along-track). Observed
-            # in sim_pilot-20260415-110742: BASE fired at hdg 327°, FINAL
-            # fired at hdg 264°, the L1 follower on final then rolled
-            # hard left to chase the centerline track and overshot
-            # through the extended centerline to hdg 105°.
-            #
-            # New guard: fire on the is_established_on_final check OR
-            # when proximity ≤ 1400 ft AND the aircraft has traversed at
-            # least 70% of the base leg along-track. The along-track
-            # condition ensures we're near the END of the base leg, not
-            # anywhere near it.
+            # The base leg is perpendicular to the runway, so the
+            # aircraft's heading during BASE is runway_course ± 90°.
+            # We want to transition to FINAL early enough that L1's
+            # follow of the final leg can execute the 90° turn onto
+            # runway course without overshooting the extended
+            # centerline. For a ~800 ft turn radius at 25° bank, the
+            # turn needs to start ~1 radius before reaching the
+            # centerline — i.e. when the aircraft has traversed ~65%
+            # of the base leg (leaving a 1225 ft "anticipation"
+            # distance for the turn on a 3500 ft base leg). Previously
+            # we used 70% plus a 1400 ft proximity check; the new
+            # along-track threshold is tuned for the perpendicular
+            # leg geometry.
             if pattern.is_established_on_final(state.runway_x_ft, state.runway_y_ft, state.track_deg):
                 return FlightPhase.FINAL
-            if state.position_ft.distance_to(pattern.base_leg.end_ft) <= 1400.0:
-                leg = pattern.base_leg
-                path = leg.end_ft - leg.start_ft
-                rel = state.position_ft - leg.start_ft
-                path_length = max(path.length(), 1.0)
-                along_track_ft = rel.dot(path.normalized())
-                if along_track_ft >= path_length * 0.7:
-                    return FlightPhase.FINAL
+            leg = pattern.base_leg
+            path = leg.end_ft - leg.start_ft
+            rel = state.position_ft - leg.start_ft
+            path_length = max(path.length(), 1.0)
+            along_track_ft = rel.dot(path.normalized())
+            if along_track_ft >= path_length * 0.65:
+                return FlightPhase.FINAL
             return phase
         if phase is FlightPhase.FINAL:
             if state.alt_agl_ft <= self.config.flare.roundout_height_ft:

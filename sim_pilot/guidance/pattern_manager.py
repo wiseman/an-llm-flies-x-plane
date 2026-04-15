@@ -63,26 +63,37 @@ def build_pattern_geometry(
     side_sign = -1.0 if runway_frame.runway.traffic_side is TrafficSide.LEFT else 1.0
     downwind_y_ft = side_sign * downwind_offset_ft
     join_x_ft = downwind_offset_ft * 1.1
-    # The nominal base-turn point is ~1500 ft past the threshold on the
-    # downwind side. The old formula tied it to ``downwind_offset_ft`` +
-    # 1500 (= -5000 for KTEST/KWHP), which meant the aircraft was 5000 ft
-    # past the runway before turning — far too deep. Observed in the
-    # KWHP log: the base turn only fired once the aircraft had extended
-    # well past the departure end.
-    base_turn_x_ft = -(1500.0 + extension_ft)
-    # Final geometry is left at the old values: the 3° glidepath math in
-    # glidepath_target_altitude_ft expects a fairly long final leg so the
-    # aircraft has time to capture the slope from pattern altitude. We
-    # tried tightening this together with the base turn change and it
-    # pushed the touchdown way past the 1/3 mark because the glide angle
-    # got too steep.
-    final_intercept_x_ft = -max(4500.0, downwind_offset_ft)
+    # The base turn point sits on the downwind side, one downwind offset
+    # past the approach threshold — i.e. 3500 ft past the threshold for
+    # a standard pattern. This puts the (perpendicular) base leg
+    # endpoint at ``base_turn_x_ft`` and leaves ``|base_turn_x_ft| +
+    # touchdown_aim`` feet of final-leg length. For a ~4500 ft final
+    # the aircraft can descend from base altitude (~300 AGL) to the
+    # flare on a 3° slope with room to spare.
+    #
+    # The old value was -1500, inherited from a diagonal base leg that
+    # extended from (-1500, -downwind_y) to (-4500, 0). When the leg
+    # was made perpendicular, -1500 left the final leg only 2500 ft
+    # long (too short for a 3° descent from pattern altitude); moving
+    # to -3500 restores a proper-length final.
+    base_turn_x_ft = -(downwind_offset_ft + extension_ft)
     final_start_x_ft = -max(10000.0, downwind_offset_ft * 2.5)
 
     entry_start_runway_ft = Vec2(join_x_ft + downwind_offset_ft, downwind_y_ft + (side_sign * downwind_offset_ft))
     join_point_runway_ft = Vec2(join_x_ft, downwind_y_ft)
     downwind_end_runway_ft = Vec2(base_turn_x_ft, downwind_y_ft)
-    base_end_runway_ft = Vec2(final_intercept_x_ft, 0.0)
+    # Perpendicular base leg — stays at constant runway_x, y goes from the
+    # downwind offset back to centerline. The old implementation used a
+    # diagonal (base_turn_x, downwind_y) → (final_intercept_x, 0) that
+    # combined "turn base" and "fly toward final" into a single leg, but
+    # the aircraft's heading during the diagonal was ~130° off runway
+    # course throughout, so when BASE → FINAL fired the aircraft still
+    # had a 130° turn to make onto final and always overshot the
+    # extended centerline (observed in sim_pilot-20260415-130505.log
+    # where the safety monitor triggered a go-around at cle=797 ft).
+    # The perpendicular leg means the aircraft is only 90° off runway
+    # course at base_end, which L1 can capture cleanly.
+    base_end_runway_ft = Vec2(base_turn_x_ft, 0.0)
 
     entry_leg = StraightLeg(
         start_ft=runway_frame.to_world_frame(entry_start_runway_ft),

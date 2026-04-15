@@ -155,13 +155,15 @@ class HeadingHoldProfile:
 
 _ALT_HOLD_CAPTURE_BAND_FT = 150.0
 
-# Wider band than AltitudeHoldProfile: in normal pattern flying a C172 on
-# downwind will routinely sit 100-200 ft below target while the TECS
-# steady-state settles, so the 150 ft AltitudeHoldProfile threshold would
-# chatter in and out of climb-capture on every downwind. Only fire when
-# the aircraft is dramatically below target — e.g. LLM re-engaged
-# pattern_fly from 400 ft AGL with target 1000 ft AGL (600 ft deficit).
-_PATTERN_CLIMB_CAPTURE_BAND_FT = 400.0
+# Used to be 400 ft "to avoid chattering". But in practice stay-in-pattern
+# missions routinely enter DOWNWIND ~200-300 ft below pattern altitude
+# (the crosswind-to-downwind turn sags altitude a bit while banked), and
+# at the default 0.55 throttle ceiling TECS can't climb back up before
+# the base turn. Observed in sim_pilot-20260415-130505.log: plane rolled
+# out on downwind at 700 AGL and never recovered to the 1000 AGL target.
+# Lower the threshold to 150 ft so climb-capture kicks in on any real
+# altitude deficit and TECS gets the full-climb throttle band.
+_PATTERN_CLIMB_CAPTURE_BAND_FT = 150.0
 
 
 class AltitudeHoldProfile:
@@ -669,11 +671,37 @@ class PatternFlyProfile:
                 if alt_error_ft > _PATTERN_CLIMB_CAPTURE_BAND_FT:
                     throttle_limit = (0.7, 1.0)
                     tecs_phase_override = FlightPhase.ENROUTE_CLIMB
+            # Stable target_heading_deg for the status display. Using the
+            # L1-computed desired_track_deg here would cause the display to
+            # flicker as the cross-track error closes during path
+            # following, which makes it look like "the autopilot keeps
+            # changing its mind". The actual L1 track command is still
+            # passed as target_track_deg, which is what drives lateral
+            # control; target_heading_deg is display-only. See tui.py
+            # format_snapshot_display.
+            runway_course_deg = self.runway_frame.runway.course_deg
+            side_sign = -1.0 if self.runway_frame.runway.traffic_side is TrafficSide.LEFT else 1.0
+            if phase is FlightPhase.PATTERN_ENTRY:
+                display_heading_deg = wrap_degrees_360(runway_course_deg + 180.0)
+            elif phase is FlightPhase.DOWNWIND:
+                display_heading_deg = wrap_degrees_360(runway_course_deg + 180.0)
+            elif phase is FlightPhase.BASE:
+                # Perpendicular base: heading = runway_course + 90° toward
+                # the runway from the downwind offset. For left traffic
+                # (downwind on the left of the runway course), base turns
+                # right relative to downwind heading — that's the runway
+                # course minus 90° in world. The formula simplifies to
+                # runway_course - side_sign * 90° for "left-traffic left
+                # turns".
+                display_heading_deg = wrap_degrees_360(runway_course_deg - side_sign * 90.0)
+            else:
+                display_heading_deg = runway_course_deg
             return GuidanceTargets(
                 lateral_mode=LateralMode.PATH_FOLLOW,
                 vertical_mode=vertical_mode,
                 target_bank_deg=bank_cmd_deg,
                 target_track_deg=desired_track_deg,
+                target_heading_deg=display_heading_deg,
                 target_path=leg,
                 target_altitude_ft=target_altitude_ft,
                 target_speed_kt=target_speed_kt,

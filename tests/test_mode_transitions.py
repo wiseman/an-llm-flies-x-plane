@@ -378,15 +378,16 @@ class StayInPatternClimbTests(unittest.TestCase):
         )
         self.assertEqual(phase, FlightPhase.ENROUTE_CLIMB)
 
-    def test_crosswind_holds_until_downwind_offset(self) -> None:
+    def test_crosswind_holds_until_heading_captured_and_at_offset(self) -> None:
         # Just after turning crosswind, the aircraft is still near the
         # runway centerline in the y axis — it must stay in CROSSWIND.
+        # Crosswind course for runway 36 (course 0) left traffic is 270°.
         phase = self.mode_manager.update(
             FlightPhase.CROSSWIND,
             make_state(
                 alt_agl_ft=900.0,
                 runway_x_ft=5000.0,
-                runway_y_ft=-500.0,  # only 500 ft toward the -3500 ft offset
+                runway_y_ft=-500.0,  # only 500 ft toward the -3500 offset
                 heading_deg=270.0,
                 track_deg=270.0,
                 on_ground=False,
@@ -398,15 +399,37 @@ class StayInPatternClimbTests(unittest.TestCase):
         )
         self.assertEqual(phase, FlightPhase.CROSSWIND)
 
-    def test_crosswind_transitions_to_downwind_near_offset(self) -> None:
-        # 80% of the 3500 ft downwind offset = -2800 ft; CROSSWIND →
-        # DOWNWIND fires once the aircraft has crossed that line.
+    def test_crosswind_holds_when_at_offset_but_still_turning(self) -> None:
+        # Regression: the old trigger fired at 80% offset even if the
+        # aircraft was still mid-turn from upwind to crosswind heading.
+        # Now we require the crosswind heading to be captured (within
+        # 15° of course - 90) before DOWNWIND can fire.
         phase = self.mode_manager.update(
             FlightPhase.CROSSWIND,
             make_state(
                 alt_agl_ft=950.0,
                 runway_x_ft=5000.0,
-                runway_y_ft=-2900.0,
+                runway_y_ft=-3500.0,  # at the full offset
+                heading_deg=330.0,  # still mostly on upwind heading
+                track_deg=330.0,
+                on_ground=False,
+            ),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+            stay_in_pattern=True,
+        )
+        self.assertEqual(phase, FlightPhase.CROSSWIND)
+
+    def test_crosswind_transitions_to_downwind_when_captured_and_at_offset(self) -> None:
+        # Runway 36 course 0°, left traffic: crosswind course is 270°.
+        # Both conditions satisfied → transition fires.
+        phase = self.mode_manager.update(
+            FlightPhase.CROSSWIND,
+            make_state(
+                alt_agl_ft=950.0,
+                runway_x_ft=5000.0,
+                runway_y_ft=-3500.0,
                 heading_deg=270.0,
                 track_deg=270.0,
                 on_ground=False,
@@ -503,18 +526,19 @@ class DownwindBaseTurnFormulaTests(unittest.TestCase):
         self.route_manager = RouteManager([])
         self.safe = SafetyStatus(False, None, self.config.limits.max_bank_pattern_deg)
 
-    def test_base_turn_nominal_point_is_near_threshold(self) -> None:
-        # Regression: was -(downwind_offset + 1500) = -5000 for a 3500
-        # ft downwind offset, burying the turn point deep past the
-        # runway. Now it's just -1500 — one-and-a-half runway lengths
-        # past the threshold — regardless of downwind offset.
-        self.assertEqual(self.pattern.base_turn_x_ft, -1500.0)
+    def test_base_turn_nominal_point_matches_downwind_offset(self) -> None:
+        # base_turn_x_ft is now -downwind_offset_ft so the perpendicular
+        # base leg and final leg both get reasonable lengths. For the
+        # default 3500 ft offset that means -3500 ft past the threshold.
+        self.assertEqual(
+            self.pattern.base_turn_x_ft, -self.config.pattern.downwind_offset_ft
+        )
 
     def test_normal_speed_turns_base_at_nominal_point(self) -> None:
         phase = self.mode_manager.update(
             FlightPhase.DOWNWIND,
             make_state(
-                runway_x_ft=-1600.0,  # past the -1500 nominal trigger
+                runway_x_ft=self.pattern.base_turn_x_ft - 100.0,
                 runway_y_ft=self.pattern.downwind_y_ft,
                 gs_kt=self.config.performance.downwind_speed_kt,
                 ias_kt=self.config.performance.downwind_speed_kt,
@@ -529,7 +553,7 @@ class DownwindBaseTurnFormulaTests(unittest.TestCase):
         phase = self.mode_manager.update(
             FlightPhase.DOWNWIND,
             make_state(
-                runway_x_ft=-1000.0,  # not yet at -1500
+                runway_x_ft=self.pattern.base_turn_x_ft + 500.0,
                 runway_y_ft=self.pattern.downwind_y_ft,
                 gs_kt=self.config.performance.downwind_speed_kt,
                 ias_kt=self.config.performance.downwind_speed_kt,
