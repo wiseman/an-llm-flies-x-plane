@@ -74,6 +74,14 @@ class ConversationStateTests(unittest.TestCase):
         conv.append_atc_message("squawk 1234")
         self.assertIn("[ATC]", conv.rotating_items[0]["content"][0]["text"])
 
+    def test_append_heartbeat_message_adds_tagged_user_item(self) -> None:
+        conv = Conversation(system_prompt="sys")
+        conv.append_heartbeat_message("periodic check-in")
+        item = conv.rotating_items[0]
+        self.assertEqual(item["role"], "user")
+        self.assertIn("[HEARTBEAT]", item["content"][0]["text"])
+        self.assertIn("periodic check-in", item["content"][0]["text"])
+
     def test_append_function_call_output_requires_call_id(self) -> None:
         conv = Conversation(system_prompt="sys")
         with self.assertRaises(ValueError):

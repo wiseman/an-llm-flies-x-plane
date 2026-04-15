@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 from typing import Any, Callable
 
 import duckdb
 
+from sim_pilot.bus import SimBus
 from sim_pilot.core.config import ConfigBundle
 from sim_pilot.core.mission_manager import PilotCore, StatusSnapshot
 from sim_pilot.core.profiles import (
@@ -18,7 +19,8 @@ from sim_pilot.core.profiles import (
     SpeedHoldProfile,
     TakeoffProfile,
 )
-from sim_pilot.bus import SimBus
+from sim_pilot.core.types import FlightPhase, Runway, TrafficSide
+from sim_pilot.guidance.runway_geometry import RunwayFrame
 from sim_pilot.sim.datarefs import (
     COM1_FREQUENCY_HZ_833,
     COM2_FREQUENCY_HZ_833,
@@ -26,7 +28,7 @@ from sim_pilot.sim.datarefs import (
     LONGITUDE_DEG,
     PARKING_BRAKE_RATIO,
 )
-from sim_pilot.sim.xplane_bridge import XPlaneWebBridge
+from sim_pilot.sim.xplane_bridge import XPlaneWebBridge, _geodetic_offset_ft
 
 
 @dataclass(slots=True)
@@ -61,16 +63,22 @@ def _find_pattern_profile(ctx: ToolContext) -> PatternFlyProfile | None:
     return None
 
 
-def _status_json(snapshot: StatusSnapshot | None, ctx: "ToolContext") -> str:
+def build_status_payload(
+    snapshot: StatusSnapshot | None,
+    bridge: XPlaneWebBridge | None,
+) -> dict[str, Any]:
+    """Build the status dict that ``get_status`` returns and that heartbeats
+    embed. Pure function; no ToolContext needed. When ``bridge`` is set,
+    the payload includes lat/lon read from the bridge's cached datarefs."""
     if snapshot is None:
-        return json.dumps({"status": "uninitialized"})
+        return {"status": "uninitialized"}
     state = snapshot.state
     lat_deg: float | None = None
     lon_deg: float | None = None
-    if ctx.bridge is not None:
-        lat_deg = ctx.bridge.get_dataref_value(LATITUDE_DEG.name)
-        lon_deg = ctx.bridge.get_dataref_value(LONGITUDE_DEG.name)
-    payload: dict[str, Any] = {
+    if bridge is not None:
+        lat_deg = bridge.get_dataref_value(LATITUDE_DEG.name)
+        lon_deg = bridge.get_dataref_value(LONGITUDE_DEG.name)
+    return {
         "t_sim": round(state.t_sim, 2),
         "active_profiles": list(snapshot.active_profiles),
         "phase": snapshot.phase.value if snapshot.phase is not None else None,
@@ -90,7 +98,10 @@ def _status_json(snapshot: StatusSnapshot | None, ctx: "ToolContext") -> str:
         "flap_index": state.flap_index,
         "gear_down": state.gear_down,
     }
-    return json.dumps(payload)
+
+
+def _status_json(snapshot: StatusSnapshot | None, ctx: "ToolContext") -> str:
+    return json.dumps(build_status_payload(snapshot, ctx.bridge))
 
 
 # ---- tools ----
@@ -143,8 +154,158 @@ def _pilot_reference_label(ctx: ToolContext) -> str:
     return " ".join(parts)
 
 
-def tool_engage_pattern_fly(ctx: ToolContext) -> str:
+def _ensure_runway_conn(ctx: ToolContext) -> duckdb.DuckDBPyConnection:
+    if ctx.runway_csv_path is None:
+        raise RuntimeError("runway CSV path is not configured (pass --runway-csv-path)")
+    if not ctx.runway_csv_path.exists():
+        raise RuntimeError(f"runway CSV not found at {ctx.runway_csv_path}")
+    if ctx._runway_conn is None:
+        ctx._runway_conn = _open_runway_duckdb(ctx.runway_csv_path)
+    return ctx._runway_conn
+
+
+def _lookup_runway_for_pattern(
+    ctx: ToolContext,
+    airport_ident: str,
+    runway_ident: str,
+    side: str,
+) -> tuple[Runway, float]:
+    """Query the runway DB for a specific runway end and return a Runway anchored
+    in the bridge's world frame plus the runway's field elevation."""
+    if ctx.bridge is None:
+        raise RuntimeError("no X-Plane bridge available; cannot compute world-frame threshold")
+    conn = _ensure_runway_conn(ctx)
+    query = (
+        "SELECT le_ident, he_ident, "
+        "le_latitude_deg, le_longitude_deg, le_heading_degT, le_elevation_ft, "
+        "he_latitude_deg, he_longitude_deg, he_heading_degT, he_elevation_ft, "
+        "length_ft "
+        "FROM runways "
+        "WHERE airport_ident = ? AND (le_ident = ? OR he_ident = ?) AND closed = 0 "
+        "LIMIT 1"
+    )
+    row = conn.execute(query, [airport_ident, runway_ident, runway_ident]).fetchone()
+    if row is None:
+        raise RuntimeError(f"runway {runway_ident!r} at {airport_ident!r} not found in database")
+    (
+        le_ident,
+        he_ident,
+        le_lat,
+        le_lon,
+        le_hdg,
+        le_elev,
+        he_lat,
+        he_lon,
+        he_hdg,
+        he_elev,
+        length_ft,
+    ) = row
+    if runway_ident == le_ident:
+        threshold_lat, threshold_lon = le_lat, le_lon
+        course_hdg = le_hdg
+        runway_elev = le_elev
+    elif runway_ident == he_ident:
+        threshold_lat, threshold_lon = he_lat, he_lon
+        course_hdg = he_hdg
+        runway_elev = he_elev
+    else:
+        raise RuntimeError(
+            f"runway lookup returned {le_ident}/{he_ident} for query {runway_ident}; internal mismatch"
+        )
+    if threshold_lat is None or threshold_lon is None or course_hdg is None:
+        raise RuntimeError(
+            f"runway {airport_ident}/{runway_ident} has no threshold coordinates or course in the database"
+        )
+    try:
+        traffic_side = TrafficSide(side.lower())
+    except ValueError as exc:
+        raise RuntimeError(f"invalid side {side!r}; expected 'left' or 'right'") from exc
+    threshold_ft = _geodetic_offset_ft(
+        lat_deg=float(threshold_lat),
+        lon_deg=float(threshold_lon),
+        georef=ctx.bridge.georef,
+    )
+    field_elevation_ft = float(runway_elev) if runway_elev is not None else 0.0
+    resolved_length_ft = float(length_ft) if length_ft is not None else 5000.0
+    runway = Runway(
+        id=runway_ident,
+        threshold_ft=threshold_ft,
+        course_deg=float(course_hdg),
+        length_ft=resolved_length_ft,
+        # The runways CSV doesn't carry a touchdown-zone length. We synthesize
+        # one from the runway length so ``RunwayFrame.touchdown_runway_x_ft``
+        # (which is half of this value, clamped to [500, length/3]) lands
+        # the aim point ~1000 ft past the threshold on normal runways and
+        # scales down for short fields. The old hardcoded 1000.0 put the
+        # aim point at the 500-ft floor regardless of runway length.
+        touchdown_zone_ft=_synthesize_touchdown_zone_ft(resolved_length_ft),
+        traffic_side=traffic_side,
+    )
+    return runway, field_elevation_ft
+
+
+def _synthesize_touchdown_zone_ft(length_ft: float) -> float:
+    return min(2000.0, max(500.0, length_ft * 0.5))
+
+
+def _install_runway_in_pilot_core(
+    ctx: ToolContext,
+    airport_ident: str,
+    runway: Runway,
+    field_elevation_ft: float,
+) -> None:
+    """Anchor the pilot core at a new runway.
+
+    Updates ``pilot.runway_frame`` and ``pilot.config`` so the state
+    estimator computes runway-relative coordinates against the new runway
+    and AGL is relative to the new field elevation. The tool context's
+    ``config`` is updated to stay in sync.
+    """
+    new_airport_config = replace(
+        ctx.config.airport,
+        airport=airport_ident,
+        field_elevation_ft=field_elevation_ft,
+        runway=runway,
+    )
+    new_config = replace(ctx.config, airport=new_airport_config)
+    ctx.config = new_config
+    ctx.pilot.config = new_config
+    ctx.pilot.runway_frame = RunwayFrame(runway)
+
+
+def tool_engage_pattern_fly(
+    ctx: ToolContext,
+    airport_ident: str,
+    runway_ident: str,
+    side: str,
+    start_phase: str,
+) -> str:
+    """Engage the full mission pilot profile anchored at a specific runway.
+
+    Looks up the runway in the DuckDB database, anchors the pilot core at its
+    real threshold, builds the pattern geometry from the DB-reported course and
+    length, and positions the phase machine at ``start_phase``. The LLM is
+    required to provide all four arguments so it is always explicit about
+    which runway the pattern is for — use 'left' for standard US traffic
+    pattern and 'takeoff_roll' as start_phase when starting on the runway
+    from the ground, or 'pattern_entry' when joining mid-flight.
+    """
+    try:
+        runway, field_elev = _lookup_runway_for_pattern(
+            ctx, airport_ident, runway_ident, side
+        )
+    except Exception as exc:
+        return f"error: {exc}"
+    _install_runway_in_pilot_core(ctx, airport_ident, runway, field_elev)
+
     profile = PatternFlyProfile(ctx.config, ctx.pilot.runway_frame)
+    try:
+        profile.phase = FlightPhase(start_phase.lower())
+    except ValueError:
+        return (
+            f"error: unknown start_phase {start_phase!r}; valid values are "
+            f"{[p.value for p in FlightPhase]}"
+        )
     displaced = ctx.pilot.engage_profile(profile)
     return f"engaged pattern_fly {_pilot_reference_label(ctx)}{_format_displaced(displaced)}"
 
@@ -299,12 +460,18 @@ def tool_cleared_to_land(ctx: ToolContext, runway_id: str) -> str:
 
 
 def tool_join_pattern(ctx: ToolContext, runway_id: str) -> str:
+    """Record a 'join pattern' clearance. This tool is informational only —
+    to actually reconfigure the pilot core for a specific runway, call
+    engage_pattern_fly(airport_ident=..., runway_ident=..., side=...) which
+    looks up the runway in the database and anchors the pattern geometry
+    there. If pattern_fly is not engaged, this returns an error so the LLM
+    knows to engage_pattern_fly first."""
     profile = _find_pattern_profile(ctx)
     if profile is None:
-        return "error: pattern_fly profile is not active; engage pattern_fly first"
-    if runway_id and runway_id != profile.runway_frame.runway.id:
-        return f"error: runway {runway_id} does not match active runway {profile.runway_frame.runway.id}"
-    return f"pattern entry acknowledged runway={profile.runway_frame.runway.id}"
+        return (
+            "error: pattern_fly profile is not active; engage_pattern_fly(airport_ident, runway_ident) first"
+        )
+    return f"pattern entry acknowledged runway={runway_id}"
 
 
 def tool_tune_radio(ctx: ToolContext, radio: str, frequency_mhz: float) -> str:
@@ -578,9 +745,36 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _fn_schema(
         "engage_pattern_fly",
-        "Engage the deterministic mission pilot. Owns all three axes and covers takeoff through landing using the configured airport's phase machine.",
-        {},
-        [],
+        "Engage the deterministic mission pilot anchored at a specific runway. "
+        "Owns all three axes. The tool looks up the runway in the database, "
+        "anchors the pattern geometry at its real threshold, and positions the "
+        "phase machine at start_phase. All four arguments are REQUIRED — if you "
+        "don't know which runway you're on, call get_status + sql_query first. "
+        "Use start_phase='takeoff_roll' to start on the ground for takeoff, or "
+        "start_phase='pattern_entry' to join an existing pattern from cruise. "
+        "Typical takeoff call: engage_pattern_fly(airport_ident='KSEA', "
+        "runway_ident='16L', side='left', start_phase='takeoff_roll'). Typical "
+        "join-from-cruise call: engage_pattern_fly(airport_ident='KSEA', "
+        "runway_ident='16L', side='left', start_phase='pattern_entry').",
+        {
+            "airport_ident": {
+                "type": "string",
+                "description": "ICAO airport code (e.g. 'KSEA').",
+            },
+            "runway_ident": {
+                "type": "string",
+                "description": "Runway end identifier (e.g. '16L', '34R').",
+            },
+            "side": {
+                "type": "string",
+                "description": "Traffic pattern side: 'left' (standard US) or 'right'.",
+            },
+            "start_phase": {
+                "type": "string",
+                "description": "Initial phase for the phase machine. 'takeoff_roll' if starting on the ground, 'pattern_entry' if joining from cruise, 'downwind' if already on downwind, etc.",
+            },
+        },
+        ["airport_ident", "runway_ident", "side", "start_phase"],
     ),
     _fn_schema(
         "engage_takeoff",

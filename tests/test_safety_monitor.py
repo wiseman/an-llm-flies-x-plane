@@ -48,12 +48,17 @@ class SafetyMonitorTests(unittest.TestCase):
         self.monitor = SafetyMonitor(load_default_config_bundle())
 
     def test_unstable_lateral_alignment_requests_go_around(self) -> None:
+        # At 150 ft AGL the scaled limit is 300 ft; 400 ft is above it.
         status = self.monitor.evaluate(
-            make_state(centerline_error_ft=160.0),
+            make_state(alt_agl_ft=150.0, centerline_error_ft=400.0),
             FlightPhase.FINAL,
         )
         self.assertTrue(status.request_go_around)
-        self.assertEqual(status.reason, "unstable_lateral")
+        assert status.reason is not None
+        self.assertIn("unstable_lateral", status.reason)
+        self.assertIn("cle=400ft", status.reason)
+        self.assertIn("agl=150ft", status.reason)
+        self.assertIn("limit=300ft", status.reason)
 
     def test_low_stall_margin_requests_go_around(self) -> None:
         status = self.monitor.evaluate(
@@ -61,7 +66,45 @@ class SafetyMonitorTests(unittest.TestCase):
             FlightPhase.FINAL,
         )
         self.assertTrue(status.request_go_around)
-        self.assertEqual(status.reason, "low_energy")
+        assert status.reason is not None
+        self.assertIn("low_energy", status.reason)
+        self.assertIn("stall_margin=1.05", status.reason)
+
+    def test_centerline_limit_scales_with_altitude(self) -> None:
+        # At 200 ft AGL (high end), 300 ft off is within the 400 ft limit.
+        high_alt = self.monitor.evaluate(
+            make_state(alt_agl_ft=199.0, centerline_error_ft=300.0),
+            FlightPhase.FINAL,
+        )
+        self.assertFalse(high_alt.request_go_around)
+        # At 40 ft AGL the scaled limit is 80 ft; 100 ft is over it.
+        low_alt = self.monitor.evaluate(
+            make_state(alt_agl_ft=40.0, centerline_error_ft=100.0, stall_margin=2.0),
+            FlightPhase.FINAL,
+        )
+        self.assertTrue(low_alt.request_go_around)
+        assert low_alt.reason is not None
+        self.assertIn("unstable_lateral", low_alt.reason)
+
+    def test_centerline_limit_has_30_foot_floor_near_ground(self) -> None:
+        # At 5 ft AGL, the scaled limit (2 * 5 = 10 ft) must be clamped
+        # to the 30 ft floor — otherwise the floor doesn't protect us in
+        # the flare and every slight deviation trips GA.
+        status = self.monitor.evaluate(
+            make_state(alt_agl_ft=5.0, centerline_error_ft=25.0, stall_margin=2.0),
+            FlightPhase.FINAL,
+        )
+        self.assertFalse(status.request_go_around)
+
+    def test_moderate_intercept_at_high_final_altitude_is_allowed(self) -> None:
+        # Regression: the old flat 100 ft threshold rejected legitimate
+        # intercepts. At 180 ft AGL with 150 ft of centerline offset
+        # (below the 360 ft scaled limit), safety monitor must not GA.
+        status = self.monitor.evaluate(
+            make_state(alt_agl_ft=180.0, centerline_error_ft=150.0, stall_margin=2.0),
+            FlightPhase.FINAL,
+        )
+        self.assertFalse(status.request_go_around)
 
 
 if __name__ == "__main__":

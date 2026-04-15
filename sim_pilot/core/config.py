@@ -133,7 +133,6 @@ class SafetyLimits:
 
 @dataclass(slots=True, frozen=True)
 class MissionConfig:
-    outbound_waypoint_ft: Vec2
     entry_start_runway_ft: Vec2
 
 
@@ -248,10 +247,6 @@ def load_default_config_bundle() -> ConfigBundle:
             traffic_side=TrafficSide(str(runway_data["traffic_side"])),
         ),
         mission=MissionConfig(
-            outbound_waypoint_ft=Vec2(
-                float(mission_data["outbound_waypoint_x_ft"]),
-                float(mission_data["outbound_waypoint_y_ft"]),
-            ),
             entry_start_runway_ft=Vec2(
                 float(mission_data["entry_start_runway_x_ft"]),
                 float(mission_data["entry_start_runway_y_ft"]),

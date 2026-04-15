@@ -14,10 +14,12 @@ from sim_pilot.core.types import (
     GuidanceTargets,
     LateralMode,
     StraightLeg,
+    TrafficSide,
     VerticalMode,
     Waypoint,
     clamp,
     wrap_degrees_180,
+    wrap_degrees_360,
 )
 from sim_pilot.guidance.lateral import L1PathFollower
 from sim_pilot.guidance.pattern_manager import (
@@ -55,6 +57,7 @@ class ProfileContribution:
     flaps_cmd: int | None = None
     gear_down: bool | None = None
     brakes: float | None = None
+    tecs_phase_override: FlightPhase | None = None
 
 
 class GuidanceProfile(Protocol):
@@ -150,7 +153,31 @@ class HeadingHoldProfile:
         )
 
 
+_ALT_HOLD_CAPTURE_BAND_FT = 150.0
+
+# Wider band than AltitudeHoldProfile: in normal pattern flying a C172 on
+# downwind will routinely sit 100-200 ft below target while the TECS
+# steady-state settles, so the 150 ft AltitudeHoldProfile threshold would
+# chatter in and out of climb-capture on every downwind. Only fire when
+# the aircraft is dramatically below target — e.g. LLM re-engaged
+# pattern_fly from 400 ft AGL with target 1000 ft AGL (600 ft deficit).
+_PATTERN_CLIMB_CAPTURE_BAND_FT = 400.0
+
+
 class AltitudeHoldProfile:
+    """Hold a target altitude (MSL) via TECS.
+
+    When the aircraft is within ~150 ft of the target this profile asks TECS
+    for the default cruise tuning (trim throttle ~0.58, trim pitch ~2 deg),
+    which gives smooth small-error corrections. When the error is larger —
+    which happens whenever the LLM commands a new altitude hundreds or
+    thousands of feet away — it hints a ``tecs_phase_override`` and a
+    narrower ``throttle_limit`` so TECS uses climb-capture or
+    descent-capture gains. Without this regime switch the CRUISE gains are
+    far too weak to catch a 500+ ft setpoint in reasonable time (the
+    aircraft just sinks toward the target at cruise trim throttle).
+    """
+
     name: ClassVar[str] = "altitude_hold"
     owns: ClassVar[frozenset[Axis]] = frozenset({Axis.VERTICAL})
 
@@ -158,6 +185,27 @@ class AltitudeHoldProfile:
         self.altitude_ft = float(altitude_ft)
 
     def contribute(self, state: AircraftState, dt: float, pilot: "PilotCore") -> ProfileContribution:
+        error_ft = self.altitude_ft - state.alt_msl_ft
+        if error_ft > _ALT_HOLD_CAPTURE_BAND_FT:
+            # Climb capture: clamp throttle high so TECS has to use near-full
+            # power, and hand TECS the ENROUTE_CLIMB trim (0.85 throttle /
+            # 6 deg pitch). At max pitch 12 deg and 70-90% throttle the C172
+            # actually climbs toward the target instead of sagging.
+            return ProfileContribution(
+                vertical_mode=VerticalMode.TECS,
+                target_altitude_ft=self.altitude_ft,
+                throttle_limit=(0.7, 1.0),
+                tecs_phase_override=FlightPhase.ENROUTE_CLIMB,
+            )
+        if error_ft < -_ALT_HOLD_CAPTURE_BAND_FT:
+            # Descent capture: force low throttle so the aircraft actually
+            # descends, and use DESCENT trim (0.35 throttle / -1.5 deg pitch).
+            return ProfileContribution(
+                vertical_mode=VerticalMode.TECS,
+                target_altitude_ft=self.altitude_ft,
+                throttle_limit=(0.1, 0.5),
+                tecs_phase_override=FlightPhase.DESCENT,
+            )
         return ProfileContribution(
             vertical_mode=VerticalMode.TECS,
             target_altitude_ft=self.altitude_ft,
@@ -189,13 +237,52 @@ def build_takeoff_roll_guidance(config: ConfigBundle, runway_frame: RunwayFrame)
     )
 
 
-def build_rotate_guidance(config: ConfigBundle, runway_frame: RunwayFrame) -> GuidanceTargets:
-    """Rotation: full power, pitch up to initial climb attitude, path follow the runway centerline extension."""
+def build_rotate_guidance(
+    config: ConfigBundle,
+    runway_frame: RunwayFrame,
+    state: AircraftState,
+    bank_limit_deg: float,
+) -> GuidanceTargets:
+    """Rotation: full power, pitch up to initial climb attitude.
+
+    Lateral control depends on whether the wheels are on the ground:
+
+    - Still rolling: keep ``ROLLOUT_CENTERLINE`` (rudder + nosewheel)
+      authoritative and emit ``target_bank_deg=0``. Ailerons don't help
+      a three-wheel aircraft hold the runway centerline and can induce
+      ground-handling surprises.
+    - Wheels off: switch to ``TRACK_HOLD`` with a proportional bank
+      command toward runway course so the aircraft rolls back onto the
+      runway extension immediately after liftoff.
+
+    Regression note: the old implementation emitted ``PATH_FOLLOW`` with
+    no ``target_track_deg`` and ``target_bank_deg=0.0``, which appeared
+    in the status bus as ``tgt_hdg=—`` and left the bank controller
+    holding wings level regardless of any drift. During the KWHP log
+    (`output/sim_pilot-20260415-094519.log`) the aircraft rotated ~45°
+    off runway heading and PatternFlyProfile had no lateral authority
+    during the critical liftoff transition.
+    """
+    target_course_deg = runway_frame.runway.course_deg
+    if state.on_ground:
+        return GuidanceTargets(
+            lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
+            vertical_mode=VerticalMode.PITCH_HOLD,
+            target_bank_deg=0.0,
+            target_heading_deg=target_course_deg,
+            target_track_deg=target_course_deg,
+            target_pitch_deg=8.0,
+            target_speed_kt=config.performance.vy_kt,
+            throttle_limit=(1.0, 1.0),
+        )
+    track_error_deg = wrap_degrees_180(target_course_deg - state.track_deg)
+    target_bank_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
     return GuidanceTargets(
-        lateral_mode=LateralMode.PATH_FOLLOW,
+        lateral_mode=LateralMode.TRACK_HOLD,
         vertical_mode=VerticalMode.PITCH_HOLD,
-        target_path=runway_frame.departure_leg(),
-        target_bank_deg=0.0,
+        target_bank_deg=target_bank_deg,
+        target_heading_deg=target_course_deg,
+        target_track_deg=target_course_deg,
         target_pitch_deg=8.0,
         target_speed_kt=config.performance.vy_kt,
         throttle_limit=(1.0, 1.0),
@@ -241,14 +328,28 @@ class TakeoffProfile:
         if self.phase is FlightPhase.TAKEOFF_ROLL:
             guidance = build_takeoff_roll_guidance(self.config, self.runway_frame)
         elif self.phase is FlightPhase.ROTATE:
-            guidance = build_rotate_guidance(self.config, self.runway_frame)
+            guidance = build_rotate_guidance(
+                self.config,
+                self.runway_frame,
+                state,
+                bank_limit_deg=self.safety_monitor.bank_limit_deg(self.phase),
+            )
         elif self.phase in {FlightPhase.INITIAL_CLIMB, FlightPhase.ENROUTE_CLIMB, FlightPhase.CRUISE}:
+            # Airborne on runway course: compute a bank command from track
+            # error so the aircraft actively rolls back onto the runway
+            # course when it drifts. Previously this was hard-coded to 0.0
+            # which meant the plane just flew whatever heading it left the
+            # ground on.
+            target_track_deg = self.runway_frame.runway.course_deg
+            track_error_deg = wrap_degrees_180(target_track_deg - state.track_deg)
+            bank_limit_deg = self.safety_monitor.bank_limit_deg(self.phase)
+            target_bank_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
             guidance = GuidanceTargets(
                 lateral_mode=LateralMode.TRACK_HOLD,
                 vertical_mode=VerticalMode.TECS,
-                target_bank_deg=0.0,
-                target_track_deg=self.runway_frame.runway.course_deg,
-                target_heading_deg=self.runway_frame.runway.course_deg,
+                target_bank_deg=target_bank_deg,
+                target_track_deg=target_track_deg,
+                target_heading_deg=target_track_deg,
                 target_altitude_ft=self.config.cruise_altitude_ft,
                 target_speed_kt=self.config.performance.vy_kt,
                 throttle_limit=(0.9, 1.0),
@@ -287,17 +388,23 @@ class PatternFlyProfile:
         self._force_go_around_trigger = False
         self.cleared_to_land_runway: str | None = None
         self.phase: FlightPhase = FlightPhase.PREFLIGHT
+        # Set on the tick a go-around is triggered, so observers (heartbeat
+        # pump, status snapshot) can surface why the state machine flipped
+        # into GO_AROUND instead of forcing them to reconstruct it from
+        # position / altitude history.
+        self.last_go_around_reason: str | None = None
         self.mode_manager = ModeManager(config)
         self.safety_monitor = SafetyMonitor(config)
         self.lateral_guidance = L1PathFollower()
         self.pattern = self._build_pattern_geometry()
+        # Only one waypoint: the pattern entry point. We used to also have
+        # an "outbound" waypoint (default (0, 91142) in world frame = 91 kft
+        # due north of the georef) which was meaningless for live runs and
+        # was the waypoint GO_AROUND's direct_to() locked on, producing the
+        # "go-around turns to 2°" bug. GO_AROUND now has its own runway-
+        # heading branch in _guidance_for_phase.
         self.route_manager = RouteManager(
             [
-                Waypoint(
-                    name="outbound",
-                    position_ft=config.airport.mission.outbound_waypoint_ft,
-                    altitude_ft=config.cruise_altitude_ft,
-                ),
                 Waypoint(
                     name="pattern_entry_start",
                     position_ft=runway_frame.to_world_frame(config.airport.mission.entry_start_runway_ft),
@@ -323,6 +430,7 @@ class PatternFlyProfile:
         self.route_manager.advance_if_needed(state.position_ft)
         safety_status = self.safety_monitor.evaluate(state, self.phase)
         previous_phase = self.phase
+        manual_go_around_triggered = self._force_go_around_trigger
         self.phase = self.mode_manager.update(
             self.phase,
             state,
@@ -331,11 +439,22 @@ class PatternFlyProfile:
             safety_status,
             turn_base_now=self._turn_base_trigger,
             force_go_around=self._force_go_around_trigger,
+            stay_in_pattern=True,
         )
         if previous_phase is FlightPhase.DOWNWIND and self.phase is not FlightPhase.DOWNWIND:
             self._turn_base_trigger = False
         if self.phase is FlightPhase.GO_AROUND:
             self._force_go_around_trigger = False
+            # Record why this tick flipped to GO_AROUND — but only on the
+            # transition itself, so that subsequent ticks in GO_AROUND
+            # don't overwrite with stale reasons.
+            if previous_phase is not FlightPhase.GO_AROUND:
+                if manual_go_around_triggered:
+                    self.last_go_around_reason = "manual_trigger"
+                elif safety_status.reason is not None:
+                    self.last_go_around_reason = safety_status.reason
+                else:
+                    self.last_go_around_reason = "unknown"
         guidance = self._guidance_for_phase(state, self.phase)
         guidance = self.safety_monitor.apply_limits(guidance, self.phase)
         return _guidance_to_contribution(guidance)
@@ -352,14 +471,87 @@ class PatternFlyProfile:
         if phase is FlightPhase.TAKEOFF_ROLL:
             return build_takeoff_roll_guidance(self.config, self.runway_frame)
         if phase is FlightPhase.ROTATE:
-            return build_rotate_guidance(self.config, self.runway_frame)
-        if phase in {FlightPhase.INITIAL_CLIMB, FlightPhase.ENROUTE_CLIMB, FlightPhase.CRUISE, FlightPhase.DESCENT, FlightPhase.GO_AROUND}:
+            return build_rotate_guidance(
+                self.config,
+                self.runway_frame,
+                state,
+                bank_limit_deg=bank_limit_deg,
+            )
+        if phase is FlightPhase.GO_AROUND:
+            # Climb runway heading at Vy, retract flaps to takeoff setting,
+            # and level off at pattern altitude so the next pattern entry
+            # doesn't have to re-descend. Explicitly does NOT consult
+            # route_manager.active_waypoint(), because direct_to() from a
+            # position abeam the runway to a distant waypoint produced
+            # nonsense go-around headings in the field.
+            runway_course_deg = self.runway_frame.runway.course_deg
+            track_error_deg = wrap_degrees_180(runway_course_deg - state.track_deg)
+            bank_cmd_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
+            return GuidanceTargets(
+                lateral_mode=LateralMode.TRACK_HOLD,
+                vertical_mode=VerticalMode.TECS,
+                target_bank_deg=bank_cmd_deg,
+                target_track_deg=runway_course_deg,
+                target_heading_deg=runway_course_deg,
+                target_altitude_ft=self.config.pattern_altitude_msl_ft,
+                target_speed_kt=self.config.performance.vy_kt,
+                throttle_limit=(0.9, 1.0),
+                flaps_cmd=10,
+                gear_down=True,
+            )
+        if phase is FlightPhase.INITIAL_CLIMB:
+            # Upwind: hold runway course straight out, climb toward pattern
+            # altitude at Vy. Replaces the old ``direct_to(pattern_entry_start)``
+            # behavior, which banked the aircraft off runway heading within
+            # seconds of wheels-up (seen in the KWHP log at alt_agl=43 ft).
+            target_course_deg = self.runway_frame.runway.course_deg
+            track_error_deg = wrap_degrees_180(target_course_deg - state.track_deg)
+            bank_cmd_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
+            return GuidanceTargets(
+                lateral_mode=LateralMode.TRACK_HOLD,
+                vertical_mode=VerticalMode.TECS,
+                target_bank_deg=bank_cmd_deg,
+                target_track_deg=target_course_deg,
+                target_heading_deg=target_course_deg,
+                target_altitude_ft=self.config.pattern_altitude_msl_ft,
+                target_speed_kt=self.config.performance.vy_kt,
+                throttle_limit=(0.75, 1.0),
+                tecs_phase_override=FlightPhase.ENROUTE_CLIMB,
+            )
+        if phase is FlightPhase.CROSSWIND:
+            # 90° turn away from runway heading (left for left traffic,
+            # right for right traffic). Continue climbing toward pattern
+            # altitude at Vy — the turn typically completes at or just
+            # below pattern altitude.
+            side_sign = -1.0 if self.runway_frame.runway.traffic_side is TrafficSide.LEFT else 1.0
+            crosswind_course_deg = wrap_degrees_360(
+                self.runway_frame.runway.course_deg + (side_sign * 90.0)
+            )
+            track_error_deg = wrap_degrees_180(crosswind_course_deg - state.track_deg)
+            bank_cmd_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
+            return GuidanceTargets(
+                lateral_mode=LateralMode.TRACK_HOLD,
+                vertical_mode=VerticalMode.TECS,
+                target_bank_deg=bank_cmd_deg,
+                target_track_deg=crosswind_course_deg,
+                target_heading_deg=crosswind_course_deg,
+                target_altitude_ft=self.config.pattern_altitude_msl_ft,
+                target_speed_kt=self.config.performance.vy_kt,
+                throttle_limit=(0.7, 1.0),
+                tecs_phase_override=FlightPhase.ENROUTE_CLIMB,
+            )
+        if phase in {FlightPhase.ENROUTE_CLIMB, FlightPhase.CRUISE, FlightPhase.DESCENT}:
+            # Airborne rejoin branch: the LLM engaged PatternFlyProfile
+            # mid-flight and needs to navigate back to the pattern entry
+            # point before beginning PATTERN_ENTRY. Stay-in-pattern flows
+            # that start from TAKEOFF_ROLL go INITIAL_CLIMB → CROSSWIND →
+            # DOWNWIND and never enter this branch.
             waypoint = self.route_manager.active_waypoint()
             desired_track_deg = state.track_deg
             bank_cmd_deg = 0.0
             if waypoint is not None:
                 desired_track_deg, bank_cmd_deg = self.lateral_guidance.direct_to(state, waypoint, max_bank_deg=bank_limit_deg)
-            if phase in {FlightPhase.INITIAL_CLIMB, FlightPhase.ENROUTE_CLIMB, FlightPhase.GO_AROUND}:
+            if phase is FlightPhase.ENROUTE_CLIMB:
                 target_altitude_ft = self.config.cruise_altitude_ft
                 target_speed_kt = self.config.performance.vy_kt
                 throttle_limit = (0.75, 1.0)
@@ -384,25 +576,70 @@ class PatternFlyProfile:
         if phase in {FlightPhase.PATTERN_ENTRY, FlightPhase.DOWNWIND, FlightPhase.BASE, FlightPhase.FINAL}:
             leg = self.pattern.leg_for_phase(phase)
             assert leg is not None
-            desired_track_deg, bank_cmd_deg = self.lateral_guidance.follow_leg(state, leg, max_bank_deg=bank_limit_deg)
+            if phase is FlightPhase.PATTERN_ENTRY:
+                # Direct-to the downwind join point instead of following
+                # the rigid entry_leg. The old entry_leg started at a
+                # fixed upwind-and-offset point and ran diagonally to the
+                # join point, so an aircraft engaging pattern_fly from
+                # any other position (the KWHP log scenario: LLM engaged
+                # mid-flight from SE of the airport) had to fly AWAY
+                # from the runway to reach the entry_leg start before
+                # it could turn inbound. Direct-to the join point always
+                # produces a sensible inbound bearing regardless of
+                # starting position. Once close enough the mode_manager
+                # transitions to DOWNWIND on its own.
+                join_waypoint = Waypoint(
+                    name="pattern_join",
+                    position_ft=self.runway_frame.to_world_frame(self.pattern.join_point_runway_ft),
+                    altitude_ft=self.config.pattern_altitude_msl_ft,
+                )
+                desired_track_deg, bank_cmd_deg = self.lateral_guidance.direct_to(
+                    state, join_waypoint, max_bank_deg=bank_limit_deg
+                )
+            else:
+                desired_track_deg, bank_cmd_deg = self.lateral_guidance.follow_leg(state, leg, max_bank_deg=bank_limit_deg)
+            # C172 landing flap schedule: clean on pattern entry so we have
+            # climb/speed margin for rejoins, first notch abeam the numbers,
+            # second on base, full on final. The old schedule had entry/final
+            # at 20 and downwind/base at 10, which capped IAS during the
+            # climb-to-pattern-altitude rejoin seen in the KWHP log.
+            tecs_phase_override: FlightPhase | None = None
             if phase is FlightPhase.PATTERN_ENTRY:
                 target_altitude_ft = self.config.pattern_altitude_msl_ft
                 target_speed_kt = self.config.performance.downwind_speed_kt
                 vertical_mode = VerticalMode.TECS
                 glidepath = None
                 throttle_limit = (0.2, 0.6)
+                flaps_cmd = 0
             elif phase is FlightPhase.DOWNWIND:
                 target_altitude_ft = self.config.pattern_altitude_msl_ft
                 target_speed_kt = self.config.performance.downwind_speed_kt
                 vertical_mode = VerticalMode.TECS
                 glidepath = None
                 throttle_limit = (0.2, 0.55)
+                flaps_cmd = 10
             elif phase is FlightPhase.BASE:
-                target_altitude_ft = self.config.airport.field_elevation_ft + 600.0
+                # Target the glidepath altitude at the END of the base
+                # leg. This commands TECS to descend from pattern
+                # altitude to the 3° slope intercept so that BASE →
+                # FINAL hands off near the glidepath. The old behavior
+                # held a flat 600 AGL, which left the aircraft far
+                # above the glidepath at final intercept and caused
+                # long floats before touchdown (observed on KWHP 4120
+                # ft runway: touchdown ~3000 ft past the threshold).
+                base_end_runway = self.runway_frame.to_runway_frame(
+                    self.pattern.base_leg.end_ft
+                )
+                target_altitude_ft = glidepath_target_altitude_ft(
+                    self.runway_frame,
+                    runway_x_ft=base_end_runway.x,
+                    field_elevation_ft=self.config.airport.field_elevation_ft,
+                )
                 target_speed_kt = self.config.performance.base_speed_kt
                 vertical_mode = VerticalMode.TECS
                 glidepath = None
                 throttle_limit = (0.1, 0.5)
+                flaps_cmd = 20
             else:
                 target_altitude_ft = glidepath_target_altitude_ft(
                     self.runway_frame,
@@ -417,6 +654,21 @@ class PatternFlyProfile:
                     aimpoint_ft_from_threshold=self.runway_frame.touchdown_runway_x_ft,
                 )
                 throttle_limit = (0.1, 0.65)
+                flaps_cmd = 30
+            # Climb-capture for PATTERN_ENTRY/DOWNWIND: if the LLM
+            # re-engaged pattern_fly from well below pattern altitude
+            # (e.g. during the KWHP recovery, where the aircraft was at
+            # 400 ft AGL with target 1000 ft AGL), the normal 0.55–0.60
+            # throttle ceiling can't simultaneously climb and accelerate.
+            # Hint TECS into ENROUTE_CLIMB trim with a higher ceiling
+            # until within _PATTERN_CLIMB_CAPTURE_BAND_FT of target.
+            # Explicitly skipped on BASE/FINAL (descent phases) because a
+            # high throttle ceiling there would mask over-speed problems.
+            if phase in {FlightPhase.PATTERN_ENTRY, FlightPhase.DOWNWIND}:
+                alt_error_ft = target_altitude_ft - state.alt_msl_ft
+                if alt_error_ft > _PATTERN_CLIMB_CAPTURE_BAND_FT:
+                    throttle_limit = (0.7, 1.0)
+                    tecs_phase_override = FlightPhase.ENROUTE_CLIMB
             return GuidanceTargets(
                 lateral_mode=LateralMode.PATH_FOLLOW,
                 vertical_mode=vertical_mode,
@@ -427,7 +679,8 @@ class PatternFlyProfile:
                 target_speed_kt=target_speed_kt,
                 glidepath=glidepath,
                 throttle_limit=throttle_limit,
-                flaps_cmd=10 if phase in {FlightPhase.DOWNWIND, FlightPhase.BASE} else 20,
+                flaps_cmd=flaps_cmd,
+                tecs_phase_override=tecs_phase_override,
             )
         if phase is FlightPhase.ROUNDOUT:
             desired_track_deg, bank_cmd_deg = self.lateral_guidance.follow_leg(state, self.pattern.final_leg, max_bank_deg=min(bank_limit_deg, 8.0))

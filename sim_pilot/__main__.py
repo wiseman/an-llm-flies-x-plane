@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -110,7 +111,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path.home() / "data" / "runways.csv",
         help="Path to the runway/airport CSV that the LLM's sql_query tool reads via DuckDB (with the spatial extension loaded). The CSV is read directly — no separate build step.",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Path to a file that receives a timestamped transcript of every status/log/radio line. If omitted, a file is auto-generated under output/ with a timestamped name; pass an empty string or a specific path to override. Pass --no-log-file to disable.",
+    )
+    parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        help="Disable the default file logging entirely.",
+    )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=30.0,
+        help="Seconds of idle time before the heartbeat pump wakes the LLM with a 'nothing has happened, do you want to act?' check-in. The timer resets whenever a user/ATC message arrives, and a heartbeat is emitted immediately on any phase or profile change regardless of the idle timer. Default 30.",
+    )
+    parser.add_argument(
+        "--no-heartbeat",
+        action="store_true",
+        help="Disable the heartbeat pump entirely. The LLM will only be invoked when the user or ATC sends a message.",
+    )
     return parser
+
+
+def _resolve_log_file_path(explicit_path: Path | None, disabled: bool) -> Path | None:
+    if disabled:
+        return None
+    if explicit_path is not None:
+        return explicit_path
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    return Path("output") / f"sim_pilot-{timestamp}.log"
 
 
 def resolve_scenario_name(explicit_name: str | None, wind_vector: Vec2) -> str:
@@ -129,10 +161,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.backend == "xplane":
         if args.log_csv is not None or args.plots_dir is not None:
             raise SystemExit("Live X-Plane runs do not yet support --log-csv or --plots-dir.")
+        log_file_path = _resolve_log_file_path(args.log_file, args.no_log_file)
         print("backend=xplane")
         print(f"xplane_host={args.xplane_host}")
         print(f"xplane_port={args.xplane_port}")
         print(f"llm_model={args.llm_model}")
+        if log_file_path is not None:
+            print(f"log_file={log_file_path}")
         run_live_xplane(
             config,
             LiveRunConfig(
@@ -145,6 +180,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 status_interval_s=args.status_interval_s,
                 engage_profile=args.engage_profile,
                 runway_csv_path=args.runway_csv_path,
+                log_file_path=log_file_path,
+                heartbeat_interval_s=args.heartbeat_interval,
+                heartbeat_enabled=not args.no_heartbeat,
             ),
         )
         return

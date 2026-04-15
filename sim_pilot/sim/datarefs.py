@@ -37,6 +37,17 @@ LEFT_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/left_brake_ratio")
 RIGHT_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/right_brake_ratio")
 PARKING_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/parking_brake_ratio")
 
+# Why this override exists: writes to sim/joystick/yoke_heading_ratio are
+# stored by X-Plane but not applied to the rudder / nosewheel steering unless
+# this override is set. Pitch and roll writes take effect immediately without
+# an override; only the yaw axis is special. Probed live against X-Plane
+# 12.4.1 on 2026-04-15 with the aircraft parked on KWHP runway 12: without
+# the override, yoke_heading_ratio=1.0 leaves tire_steer_command_deg at 0;
+# with the override set, the nosewheel immediately deflects to ~10 deg. This
+# was the root cause of the takeoff-roll veer observed in
+# output/sim_pilot-20260415-094519.log.
+OVERRIDE_JOYSTICK_HEADING = DatarefSpec("sim/operation/override/override_joystick_heading")
+
 COM1_FREQUENCY_HZ_833 = DatarefSpec("sim/cockpit2/radios/actuators/com1_frequency_hz_833")
 COM2_FREQUENCY_HZ_833 = DatarefSpec("sim/cockpit2/radios/actuators/com2_frequency_hz_833")
 
@@ -72,6 +83,7 @@ COMMAND_DATAREFS: tuple[DatarefSpec, ...] = (
     FLAP_HANDLE_REQUEST_RATIO,
     LEFT_BRAKE_RATIO,
     RIGHT_BRAKE_RATIO,
+    OVERRIDE_JOYSTICK_HEADING,
 )
 
 BOOTSTRAP_DATAREFS: tuple[DatarefSpec, ...] = (

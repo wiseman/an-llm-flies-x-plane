@@ -44,6 +44,7 @@ class FlightPhase(StrEnum):
     TAKEOFF_ROLL = "takeoff_roll"
     ROTATE = "rotate"
     INITIAL_CLIMB = "initial_climb"
+    CROSSWIND = "crosswind"
     ENROUTE_CLIMB = "enroute_climb"
     CRUISE = "cruise"
     DESCENT = "descent"
@@ -165,6 +166,7 @@ class GuidanceTargets:
     flaps_cmd: int | None = None
     gear_down: bool | None = None
     brakes: float = 0.0
+    tecs_phase_override: "FlightPhase | None" = None
 
 
 @dataclass(slots=True, frozen=True)

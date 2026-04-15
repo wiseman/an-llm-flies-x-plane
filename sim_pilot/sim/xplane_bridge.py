@@ -27,6 +27,7 @@ from sim_pilot.sim.datarefs import (
     LOCAL_VZ_M_S,
     LONGITUDE_DEG,
     ON_GROUND_0,
+    OVERRIDE_JOYSTICK_HEADING,
     P_DEG_S,
     PITCH_DEG,
     Q_DEG_S,
@@ -107,6 +108,20 @@ class XPlaneWebBridge:
         )
         self._subscribe_state()
         self._wait_for_initial_snapshot()
+        # Without this, writes to yoke_heading_ratio are stored but not
+        # applied to the rudder / nosewheel. See OVERRIDE_JOYSTICK_HEADING
+        # docstring in datarefs.py for the investigation notes.
+        self._send_message(
+            {
+                "req_id": self._next_req_id(),
+                "type": "dataref_set_values",
+                "params": {
+                    "datarefs": [
+                        {"id": self._command_ids[OVERRIDE_JOYSTICK_HEADING.name], "value": 1},
+                    ]
+                },
+            }
+        )
 
     def read_state(self) -> DynamicsState:
         self._drain_pending_updates()
@@ -218,6 +233,20 @@ class XPlaneWebBridge:
         )
 
     def close(self) -> None:
+        try:
+            self._send_message(
+                {
+                    "req_id": self._next_req_id(),
+                    "type": "dataref_set_values",
+                    "params": {
+                        "datarefs": [
+                            {"id": self._command_ids[OVERRIDE_JOYSTICK_HEADING.name], "value": 0},
+                        ]
+                    },
+                }
+            )
+        except Exception:
+            pass
         try:
             self._ws.close()
         except Exception:

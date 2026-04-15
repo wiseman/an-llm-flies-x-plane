@@ -41,6 +41,8 @@ class StatusSnapshot:
     phase: FlightPhase | None
     state: AircraftState
     last_commands: ActuatorCommands
+    last_guidance: GuidanceTargets | None = None
+    go_around_reason: str | None = None
 
 
 @dataclass
@@ -131,12 +133,19 @@ class PilotCore:
             state = estimate_aircraft_state(raw_state, self.config, self.runway_frame, dt)
             guidance = self._compose_guidance(state, dt)
             commands = self._commands_from_guidance(state, guidance)
+            go_around_reason: str | None = None
+            for profile in self.active_profiles:
+                if isinstance(profile, PatternFlyProfile) and profile.last_go_around_reason is not None:
+                    go_around_reason = profile.last_go_around_reason
+                    break
             self.latest_snapshot = StatusSnapshot(
                 t_sim=state.t_sim,
                 active_profiles=tuple(p.name for p in self.active_profiles),
                 phase=self._current_phase(),
                 state=state,
                 last_commands=commands,
+                last_guidance=guidance,
+                go_around_reason=go_around_reason,
             )
             return state, commands
 
@@ -191,6 +200,8 @@ class PilotCore:
                 targets.gear_down = c.gear_down
                 if c.brakes is not None:
                     targets.brakes = c.brakes
+                if c.tecs_phase_override is not None:
+                    targets.tecs_phase_override = c.tecs_phase_override
             if Axis.SPEED in profile.owns:
                 if c.target_speed_kt is not None:
                     targets.target_speed_kt = c.target_speed_kt
@@ -205,6 +216,7 @@ class PilotCore:
                 track_error_deg=track_error_deg,
                 yaw_rate_deg_s=math.degrees(state.r_rad_s),
                 gs_kt=state.gs_kt,
+                dt=state.dt,
             )
             aileron = self.bank_controller.update(0.0, state.roll_deg, state.p_rad_s, state.dt)
         else:
@@ -214,8 +226,9 @@ class PilotCore:
 
         throttle_limit = guidance.throttle_limit or (0.0, 1.0)
         if guidance.vertical_mode in {VerticalMode.TECS, VerticalMode.GLIDEPATH_TRACK}:
+            tecs_phase = guidance.tecs_phase_override or self._current_phase() or FlightPhase.CRUISE
             pitch_cmd_deg, throttle_cmd = self.tecs.update(
-                phase=self._current_phase() or FlightPhase.CRUISE,
+                phase=tecs_phase,
                 target_alt_ft=guidance.target_altitude_ft or state.alt_msl_ft,
                 target_speed_kt=guidance.target_speed_kt or state.ias_kt,
                 alt_ft=state.alt_msl_ft,

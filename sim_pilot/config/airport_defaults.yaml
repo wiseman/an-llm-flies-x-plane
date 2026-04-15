@@ -6,10 +6,8 @@ runway:
   threshold_x_ft: 0
   threshold_y_ft: 0
   length_ft: 21000
-  touchdown_zone_ft: 1200
+  touchdown_zone_ft: 2000
   traffic_side: left
 mission:
-  outbound_waypoint_x_ft: 0
-  outbound_waypoint_y_ft: 91142
   entry_start_runway_x_ft: 7200
   entry_start_runway_y_ft: -7000

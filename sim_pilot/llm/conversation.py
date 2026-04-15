@@ -117,8 +117,21 @@ need to.
   the parking brake set, so skipping the checklist will just make your next
   engage_takeoff call fail.
 - pattern_fly: full deterministic mission pilot, takeoff through landing, using
-  the configured airport's phase machine. Use this when the operator wants the
-  whole flight flown automatically.
+  the phase machine. engage_pattern_fly REQUIRES all four arguments:
+  airport_ident, runway_ident, side, start_phase. It looks the runway up in
+  the database, anchors the pattern geometry at that runway's real threshold,
+  and positions the phase machine at start_phase. Before engaging, use
+  get_status + sql_query (the "What runway am I on?" template) to figure out
+  which runway you're on. Examples:
+    * For takeoff from a known runway on the ground:
+      engage_pattern_fly(airport_ident='KSEA', runway_ident='16L',
+                         side='left', start_phase='takeoff_roll')
+    * For joining a pattern mid-flight (ATC says "join left traffic 30"):
+      engage_pattern_fly(airport_ident='KPDX', runway_ident='30',
+                         side='left', start_phase='pattern_entry')
+  join_pattern(runway_id) is a pure acknowledgment tool — it records that
+  you've acknowledged an ATC pattern clearance. To actually reconfigure the
+  pilot for a new runway, use engage_pattern_fly.
 - approach_runway: stub, not yet implemented.
 - route_follow: stub, not yet implemented.
 
@@ -128,8 +141,40 @@ speed_hold and the takeoff profile is displaced.
 
 ## Incoming messages
 
-  [OPERATOR] ... — your human operator. Reply in plain text for commentary.
-  [ATC] ...      — air traffic control. They CANNOT hear plain text. Use radio.
+  [OPERATOR] ...  — your human operator. Reply in plain text for commentary.
+  [ATC] ...       — air traffic control. They CANNOT hear plain text. Use radio.
+  [HEARTBEAT] ... — automatic wake-up. NOT a user request. See below.
+
+## Heartbeats
+
+The system will wake you with a [HEARTBEAT] message every ~30 seconds of
+idle time, and also immediately whenever a significant event happens —
+currently phase changes in pattern_fly (e.g. DOWNWIND → BASE) or profiles
+being engaged/disengaged. The heartbeat text describes the reason (e.g.
+"periodic check-in" or "phase changed: downwind → base").
+
+A heartbeat is NOT a user command. It is a "do you need to do anything?"
+prompt. When you receive one:
+
+  1. Call get_status to see where you actually are and what's happening.
+  2. Decide whether the current situation needs action:
+     - If you're approaching an altitude you should start descending to,
+       engage descent.
+     - If you're drifting off heading or altitude, fix it.
+     - If ATC should be updated (position call on CTAF, read back a
+       clearance you haven't yet), broadcast it.
+     - If a phase transition just happened on pattern_fly, verify the
+       new phase is appropriate and the aircraft is stable for it.
+     - If a stable approach is going well and no one has called, sleep.
+  3. If nothing needs to be done, either reply with a brief one-line
+     assessment to the operator ("stable on downwind 16L, nothing to do")
+     OR just call sleep() to end your turn silently. Prefer sleep() when
+     the situation is unchanged from the previous heartbeat — don't flood
+     the operator with periodic "all is well" messages.
+  4. Do NOT fabricate ATC transmissions, operator requests, or actions
+     in response to a heartbeat. You are observing, not conversing.
+  5. Do NOT call tools "just to be doing something" on a heartbeat.
+     sleep() is a valid and frequently correct response.
 
 ## Radio communications — REQUIRED for ATC
 
@@ -182,7 +227,7 @@ DEFAULT_TOTAL_WALL_BUDGET_S = 120.0
 
 @dataclass(slots=True, frozen=True)
 class IncomingMessage:
-    source: Literal["operator", "atc"]
+    source: Literal["operator", "atc", "heartbeat"]
     text: str
 
 
@@ -197,6 +242,13 @@ def _atc_item(text: str) -> dict[str, Any]:
     return {
         "role": "user",
         "content": [{"type": "input_text", "text": f"[ATC] {text}"}],
+    }
+
+
+def _heartbeat_item(text: str) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": [{"type": "input_text", "text": f"[HEARTBEAT] {text}"}],
     }
 
 
@@ -222,6 +274,9 @@ class Conversation:
 
     def append_atc_message(self, text: str) -> None:
         self.rotating_items.append(_atc_item(text))
+
+    def append_heartbeat_message(self, text: str) -> None:
+        self.rotating_items.append(_heartbeat_item(text))
 
     def append_response_items(self, output_items: list[dict[str, Any]]) -> None:
         for item in output_items:
@@ -340,6 +395,9 @@ def _handle_message(
 ) -> None:
     if message.source == "operator":
         conversation.append_operator_message(message.text)
+    elif message.source == "heartbeat":
+        conversation.append_heartbeat_message(message.text)
+        _emit(bus, f"[heartbeat] {message.text}")
     else:
         conversation.append_atc_message(message.text)
         _emit(bus, f"[atc] {message.text}")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from sim_pilot.sim.datarefs import COMMAND_DATAREFS, OVERRIDE_JOYSTICK_HEADING
 from sim_pilot.sim.xplane_bridge import (
     GeoReference,
     _coerce_scalar,
@@ -35,6 +36,15 @@ class FlapConversionTests(unittest.TestCase):
     def test_ratio_outside_bounds_is_clamped_to_nearest_setting(self) -> None:
         self.assertEqual(_flap_ratio_to_setting(-0.1), 0)
         self.assertEqual(_flap_ratio_to_setting(1.5), 30)
+
+
+class CommandDatarefsTests(unittest.TestCase):
+    def test_override_joystick_heading_is_resolved_at_connect(self) -> None:
+        # Regression: without this dataref being resolved on connect, the
+        # bridge can't set override_joystick_heading=1, and rudder writes
+        # to sim/joystick/yoke_heading_ratio silently no-op. See
+        # datarefs.py OVERRIDE_JOYSTICK_HEADING for the investigation.
+        self.assertIn(OVERRIDE_JOYSTICK_HEADING, COMMAND_DATAREFS)
 
 
 class ValueCoercionTests(unittest.TestCase):

@@ -63,7 +63,19 @@ def build_pattern_geometry(
     side_sign = -1.0 if runway_frame.runway.traffic_side is TrafficSide.LEFT else 1.0
     downwind_y_ft = side_sign * downwind_offset_ft
     join_x_ft = downwind_offset_ft * 1.1
-    base_turn_x_ft = -(downwind_offset_ft + 1500.0 + extension_ft)
+    # The nominal base-turn point is ~1500 ft past the threshold on the
+    # downwind side. The old formula tied it to ``downwind_offset_ft`` +
+    # 1500 (= -5000 for KTEST/KWHP), which meant the aircraft was 5000 ft
+    # past the runway before turning — far too deep. Observed in the
+    # KWHP log: the base turn only fired once the aircraft had extended
+    # well past the departure end.
+    base_turn_x_ft = -(1500.0 + extension_ft)
+    # Final geometry is left at the old values: the 3° glidepath math in
+    # glidepath_target_altitude_ft expects a fairly long final leg so the
+    # aircraft has time to capture the slope from pattern altitude. We
+    # tried tightening this together with the base turn change and it
+    # pushed the touchdown way past the 1/3 mark because the glide angle
+    # got too steep.
     final_intercept_x_ft = -max(4500.0, downwind_offset_ft)
     final_start_x_ft = -max(10000.0, downwind_offset_ft * 2.5)
 
@@ -105,6 +117,22 @@ def glidepath_target_altitude_ft(
     slope_deg: float = 3.0,
     threshold_crossing_height_ft: float = 50.0,
 ) -> float:
-    distance_from_threshold_ft = max(0.0, runway_frame.touchdown_runway_x_ft - runway_x_ft)
-    path_height_ft = threshold_crossing_height_ft + (distance_from_threshold_ft * clamp(slope_deg / 57.2958, 0.0, 0.2))
-    return field_elevation_ft + path_height_ft
+    """Target altitude for a point on (or near) the runway.
+
+    The glidepath is a 3° slope through ``touchdown_runway_x_ft`` at
+    ``threshold_crossing_height_ft`` AGL. Before the aim point the target
+    climbs upward along the slope; past the aim point it continues DOWN
+    along the same slope toward the runway surface. The old implementation
+    clamped distance to zero past the aim point, so target alt froze at
+    the threshold crossing height (≈50 AGL) forever — which trapped the
+    aircraft at 50 ft for hundreds or thousands of feet while it waited
+    for the roundout trigger (observed in sim_pilot-20260415-110742.log:
+    touchdown at runway_x≈3000 ft on a 4120 ft runway). We now let the
+    glidepath drive the aircraft toward ground level so the roundout
+    trigger (alt_agl ≤ flare.roundout_height_ft) fires close to the aim
+    point and touchdown lands near the aim point.
+    """
+    slope_rad = clamp(slope_deg / 57.2958, 0.0, 0.2)
+    distance_to_aimpoint_ft = runway_frame.touchdown_runway_x_ft - runway_x_ft
+    path_height_ft = threshold_crossing_height_ft + (distance_to_aimpoint_ft * slope_rad)
+    return field_elevation_ft + max(0.0, path_height_ft)

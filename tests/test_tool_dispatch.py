@@ -14,9 +14,20 @@ from sim_pilot.llm.tools import ToolContext, dispatch_tool
 
 
 class FakeBridge:
-    def __init__(self, initial_values: dict[str, float] | None = None) -> None:
+    def __init__(
+        self,
+        initial_values: dict[str, float] | None = None,
+        *,
+        georef_lat_deg: float = 47.4638,
+        georef_lon_deg: float = -122.308,
+    ) -> None:
+        from sim_pilot.sim.xplane_bridge import GeoReference
         self.writes: list[dict[str, float | int]] = []
         self._values: dict[str, float] = dict(initial_values or {})
+        self.georef = GeoReference(
+            threshold_lat_deg=georef_lat_deg,
+            threshold_lon_deg=georef_lon_deg,
+        )
 
     def write_dataref_values(self, updates: dict[str, float | int]) -> None:
         self.writes.append(updates)
@@ -92,11 +103,12 @@ class ProfileToolsTests(unittest.TestCase):
         self.assertIn("heading_hold", ctx.pilot.list_profile_names())
         self.assertNotIn("idle_lateral", ctx.pilot.list_profile_names())
 
-    def test_engage_pattern_fly_displaces_idle_profiles(self) -> None:
+    def test_engage_pattern_fly_without_required_args_errors(self) -> None:
         ctx = make_ctx()
         result = dispatch_tool(make_call("engage_pattern_fly"), ctx)
-        self.assertIn("pattern_fly", result)
-        self.assertEqual(ctx.pilot.list_profile_names(), ["pattern_fly"])
+        self.assertTrue(result.startswith("error:"))
+        # Profile must not be engaged when the call fails
+        self.assertNotIn("pattern_fly", ctx.pilot.list_profile_names())
 
     def test_engage_takeoff_displaces_idle_profiles(self) -> None:
         ctx = make_ctx()
@@ -189,6 +201,208 @@ class PatternEventTests(unittest.TestCase):
         ctx = make_ctx()
         result = dispatch_tool(make_call("go_around"), ctx)
         self.assertTrue(result.startswith("error:"))
+
+
+class PatternFlyRunwayLookupTests(unittest.TestCase):
+    """Tests for engage_pattern_fly + join_pattern against a real runway
+    looked up from the DuckDB-backed runway CSV."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.csv_path = Path(self._tmp.name) / "runways.csv"
+        _build_fake_runway_csv(self.csv_path)
+
+    def _make_ctx_with_bridge(self) -> ToolContext:
+        bridge = FakeBridge(
+            georef_lat_deg=47.4638,
+            georef_lon_deg=-122.308,
+        )
+        ctx = make_ctx(bridge=bridge, runway_csv_path=self.csv_path)
+        return ctx
+
+    def test_engage_pattern_fly_requires_all_four_args(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(make_call("engage_pattern_fly"), ctx)
+        self.assertTrue(result.startswith("error:"))
+
+    def test_engage_pattern_fly_for_takeoff_roll(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",
+                side="left",
+                start_phase="takeoff_roll",
+            ),
+            ctx,
+        )
+        self.assertNotIn("error", result)
+        self.assertEqual(ctx.pilot.list_profile_names(), ["pattern_fly"])
+        from sim_pilot.core.types import FlightPhase
+        profile = ctx.pilot.find_profile("pattern_fly")
+        assert isinstance(profile, PatternFlyProfile)
+        self.assertEqual(profile.phase, FlightPhase.TAKEOFF_ROLL)
+
+    def test_engage_pattern_fly_with_ksea_16l_installs_runway_frame(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        self.assertIn("pattern_fly", result)
+        self.assertNotIn("error", result)
+        # The pilot's runway_frame should now be anchored at KSEA 16L
+        self.assertEqual(ctx.pilot.runway_frame.runway.id, "16L")
+        self.assertEqual(ctx.pilot.config.airport.airport, "KSEA")
+        # KSEA 16L course is 180° (southbound)
+        self.assertAlmostEqual(ctx.pilot.runway_frame.runway.course_deg, 180.0, delta=5.0)
+        # Field elevation comes from the CSV's le_elevation_ft (432 ft for the fixture)
+        self.assertAlmostEqual(ctx.pilot.config.airport.field_elevation_ft, 432.0, delta=1.0)
+        # Profile should be pre-positioned at pattern_entry (not preflight)
+        profile = ctx.pilot.find_profile("pattern_fly")
+        assert isinstance(profile, PatternFlyProfile)
+        from sim_pilot.core.types import FlightPhase
+        self.assertEqual(profile.phase, FlightPhase.PATTERN_ENTRY)
+
+    def test_engage_pattern_fly_sets_aim_point_from_runway_length(self) -> None:
+        # Regression: the old implementation hardcoded touchdown_zone_ft
+        # to 1000, which pushed ``touchdown_runway_x_ft`` to the 500 ft
+        # floor on every runway regardless of length. The fix synthesizes
+        # touchdown_zone_ft from runway length (2000 ft TDZ for any
+        # runway >= 4000 ft), which puts the aim point at ~1000 ft past
+        # the threshold — the conventional aim-point marker location.
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",  # 11900 ft long
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        self.assertNotIn("error", result)
+        self.assertAlmostEqual(
+            ctx.pilot.runway_frame.touchdown_runway_x_ft, 1000.0, delta=1.0
+        )
+
+    def test_engage_pattern_fly_with_34r_picks_high_end_threshold(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="34R",
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        self.assertNotIn("error", result)
+        self.assertEqual(ctx.pilot.runway_frame.runway.id, "34R")
+        # 34R course is 360° (northbound), from the CSV fixture's he_heading_degT
+        self.assertAlmostEqual(ctx.pilot.runway_frame.runway.course_deg, 360.0, delta=5.0)
+
+    def test_engage_pattern_fly_with_unknown_airport_returns_error(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="NOWHERE",
+                runway_ident="16L",
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("not found", result)
+        # Profile should NOT have been engaged
+        self.assertNotIn("pattern_fly", ctx.pilot.list_profile_names())
+
+    def test_engage_pattern_fly_with_missing_runway_ident_errors(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        # Only airport_ident — missing required runway_ident/side/start_phase
+        result = dispatch_tool(
+            make_call("engage_pattern_fly", airport_ident="KSEA"),
+            ctx,
+        )
+        self.assertTrue(result.startswith("error:"))
+
+    def test_engage_pattern_fly_invalid_start_phase(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",
+                side="left",
+                start_phase="barrel_roll",
+            ),
+            ctx,
+        )
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("unknown start_phase", result)
+
+    def test_engage_pattern_fly_without_bridge_errors_for_runway_lookup(self) -> None:
+        # Simple-backend context has no bridge → can't compute world-frame threshold
+        config = load_default_config_bundle()
+        pilot = PilotCore(config)
+        ctx = ToolContext(
+            pilot=pilot,
+            bridge=None,
+            config=config,
+            recent_broadcasts=[],
+            runway_csv_path=self.csv_path,
+        )
+        result = dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("bridge", result.lower())
+
+    def test_join_pattern_acks_with_pattern_fly_active(self) -> None:
+        """Regression: the previous implementation compared runway_id against
+        profile.runway_frame.runway.id and rejected the call whenever the id
+        was None (which was the case after bootstrap). It now succeeds as
+        a pure acknowledgment regardless of the active runway's id."""
+        ctx = self._make_ctx_with_bridge()
+        # Engage pattern_fly with a specific runway so pattern_fly is active
+        dispatch_tool(
+            make_call(
+                "engage_pattern_fly",
+                airport_ident="KSEA",
+                runway_ident="16L",
+                side="left",
+                start_phase="pattern_entry",
+            ),
+            ctx,
+        )
+        result = dispatch_tool(make_call("join_pattern", runway_id="30"), ctx)
+        self.assertNotIn("error", result)
+        self.assertIn("runway=30", result)
+
+    def test_join_pattern_without_pattern_fly_active_errors(self) -> None:
+        ctx = self._make_ctx_with_bridge()
+        result = dispatch_tool(make_call("join_pattern", runway_id="30"), ctx)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("engage_pattern_fly", result)
 
 
 class RadioToolsTests(unittest.TestCase):

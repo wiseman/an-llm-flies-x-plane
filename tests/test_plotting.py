@@ -27,7 +27,10 @@ class ScenarioPlottingTests(unittest.TestCase):
             self.assertIn("<svg", overview_text)
             self.assertIn("Scenario: takeoff_to_pattern_landing", overview_text)
             self.assertIn("phase by time", overview_text)
-            self.assertIn("cruise", overview_text)
+            # downwind is long enough to be labeled in the phase bar; cruise
+            # used to be labeled too but no longer spans meaningful time now
+            # that the mission routes straight from climb to descent.
+            self.assertIn("downwind", overview_text)
             self.assertIn("<svg", ground_text)
             self.assertIn(f"Runway {config.airport.runway.id} threshold", ground_text)
             self.assertIn("north-up world frame", ground_text)

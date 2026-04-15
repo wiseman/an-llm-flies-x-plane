@@ -12,7 +12,7 @@ class ResponsesClient:
     model: str
     api_key: str | None = None
     api_base: str = "https://api.openai.com/v1"
-    reasoning_effort: str = "minimal"
+    reasoning_effort: str = "low"
 
     def create_response(
         self,
