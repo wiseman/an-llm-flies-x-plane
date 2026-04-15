@@ -19,6 +19,12 @@ class SafetyMonitor:
 
     def evaluate(self, state: AircraftState, phase: FlightPhase) -> SafetyStatus:
         bank_limit_deg = self.bank_limit_deg(phase)
+        if state.on_ground:
+            # No go-around is meaningful once the wheels are down. In
+            # live X-Plane runs the AGL reading can still say 30-50 ft
+            # for a tick or two after touchdown, which would otherwise
+            # trip the low-energy or unstable-vertical checks below.
+            return SafetyStatus(False, None, bank_limit_deg)
         if phase is FlightPhase.FINAL and state.alt_agl_ft < 200.0:
             # Altitude-scaled centerline limit: at 200 ft AGL a C172 can
             # legitimately be 400 ft off while intercepting, but at 50 ft

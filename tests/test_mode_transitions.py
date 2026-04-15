@@ -442,6 +442,68 @@ class StayInPatternClimbTests(unittest.TestCase):
         self.assertEqual(phase, FlightPhase.DOWNWIND)
 
 
+class GroundContactShortCircuitsApproachTests(unittest.TestCase):
+    """Regression: if the aircraft reports on_ground during FINAL,
+    ROUNDOUT, or FLARE, the mode machine must transition straight to
+    ROLLOUT regardless of alt_agl_ft. In live X-Plane runs the AGL
+    estimate can lag the actual touchdown by 30-50 ft — without this
+    short-circuit the aircraft stays in FINAL while decelerating on
+    the runway and the safety monitor eventually triggers a go-around
+    from a touched-down aircraft."""
+
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.mode_manager = ModeManager(self.config)
+        self.runway_frame = RunwayFrame(self.config.airport.runway)
+        self.pattern = build_pattern_geometry(
+            self.runway_frame,
+            downwind_offset_ft=self.config.pattern.downwind_offset_ft,
+            extension_ft=0.0,
+        )
+        self.route_manager = RouteManager([])
+        self.safe = SafetyStatus(False, None, self.config.limits.max_bank_pattern_deg)
+
+    def test_final_on_ground_with_stale_agl_goes_to_rollout(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.FINAL,
+            make_state(alt_agl_ft=35.0, on_ground=True, ias_kt=50.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.ROLLOUT)
+
+    def test_roundout_on_ground_goes_to_rollout(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.ROUNDOUT,
+            make_state(alt_agl_ft=15.0, on_ground=True, ias_kt=50.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.ROLLOUT)
+
+    def test_flare_on_ground_goes_to_rollout(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.FLARE,
+            make_state(alt_agl_ft=5.0, on_ground=True, ias_kt=50.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.ROLLOUT)
+
+    def test_final_airborne_still_waits_for_roundout_altitude(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.FINAL,
+            make_state(alt_agl_ft=100.0, on_ground=False),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.FINAL)
+
+
 class GoAroundHoldsPatternAltitudeTests(unittest.TestCase):
     """Regression: after a go-around the state machine should hold the
     aircraft in GO_AROUND phase — it must NOT transition to ENROUTE_CLIMB

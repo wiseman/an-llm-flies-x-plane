@@ -145,6 +145,18 @@ class ModeManager:
             if along_track_ft >= path_length * 0.65:
                 return FlightPhase.FINAL
             return phase
+        if phase in {FlightPhase.FINAL, FlightPhase.ROUNDOUT, FlightPhase.FLARE}:
+            # Wheels on the ground means we've landed, regardless of
+            # what alt_agl_ft says. In live X-Plane runs the AGL
+            # estimate can lag the actual touchdown by 30-50 ft
+            # (field_elev vs terrain-under-aircraft mismatch), which
+            # used to leave the state machine stuck in FINAL while the
+            # aircraft decelerated on the runway — TECS then kept
+            # commanding approach speed, the stall-margin dropped, and
+            # the safety monitor fired a go-around from a touched-down
+            # aircraft.
+            if state.on_ground:
+                return FlightPhase.ROLLOUT
         if phase is FlightPhase.FINAL:
             if state.alt_agl_ft <= self.config.flare.roundout_height_ft:
                 return FlightPhase.ROUNDOUT
@@ -154,8 +166,6 @@ class ModeManager:
                 return FlightPhase.FLARE
             return phase
         if phase is FlightPhase.FLARE:
-            if state.on_ground:
-                return FlightPhase.ROLLOUT
             return phase
         if phase is FlightPhase.ROLLOUT:
             if state.gs_kt <= 5.0:

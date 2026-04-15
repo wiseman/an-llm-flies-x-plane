@@ -106,6 +106,25 @@ class SafetyMonitorTests(unittest.TestCase):
         )
         self.assertFalse(status.request_go_around)
 
+    def test_on_ground_short_circuits_all_checks(self) -> None:
+        # Regression: in live X-Plane runs the AGL reading can still
+        # say 30-50 ft on touchdown due to field-elevation vs
+        # terrain-under-aircraft mismatch. If the low-energy check
+        # fires on a touched-down aircraft, it requests a go-around
+        # from a plane that's already on the runway decelerating.
+        status = self.monitor.evaluate(
+            make_state(
+                alt_agl_ft=35.0,  # stale altitude reading
+                stall_margin=1.05,  # would normally trip low_energy
+                centerline_error_ft=500.0,  # would normally trip unstable_lateral
+                vs_fpm=-1500.0,  # would normally trip unstable_vertical
+                on_ground=True,
+            ),
+            FlightPhase.FINAL,
+        )
+        self.assertFalse(status.request_go_around)
+        self.assertIsNone(status.reason)
+
 
 if __name__ == "__main__":
     unittest.main()
