@@ -13,7 +13,11 @@ from sim_pilot.core.profiles import (
     IdleVerticalProfile,
     PatternFlyProfile,
     SpeedHoldProfile,
+    TakeoffProfile,
+    build_rotate_guidance,
+    build_takeoff_roll_guidance,
 )
+from sim_pilot.core.types import FlightPhase, LateralMode, VerticalMode
 
 
 class ProfileEngagementTests(unittest.TestCase):
@@ -102,6 +106,151 @@ class IdleProfileShapeTests(unittest.TestCase):
         self.assertEqual(IdleLateralProfile.owns, frozenset({Axis.LATERAL}))
         self.assertEqual(IdleVerticalProfile.owns, frozenset({Axis.VERTICAL}))
         self.assertEqual(IdleSpeedProfile.owns, frozenset({Axis.SPEED}))
+
+
+class HeadingHoldDirectionTests(unittest.TestCase):
+    def _make_state(self, track_deg: float):
+        from sim_pilot.core.types import AircraftState, Vec2, heading_to_vector, KT_TO_FPS
+        return AircraftState(
+            t_sim=0.0,
+            dt=0.2,
+            position_ft=Vec2(0.0, 0.0),
+            alt_msl_ft=3000.0,
+            alt_agl_ft=2500.0,
+            pitch_deg=0.0,
+            roll_deg=0.0,
+            heading_deg=track_deg,
+            track_deg=track_deg,
+            p_rad_s=0.0,
+            q_rad_s=0.0,
+            r_rad_s=0.0,
+            ias_kt=90.0,
+            tas_kt=90.0,
+            gs_kt=90.0,
+            vs_fpm=0.0,
+            ground_velocity_ft_s=heading_to_vector(track_deg, 90.0 * KT_TO_FPS),
+            flap_index=0,
+            gear_down=True,
+            on_ground=False,
+            throttle_pos=0.5,
+            runway_id=None,
+            runway_dist_remaining_ft=None,
+            runway_x_ft=None,
+            runway_y_ft=None,
+            centerline_error_ft=None,
+            threshold_abeam=False,
+            distance_to_touchdown_ft=None,
+            stall_margin=1.5,
+        )
+
+    def test_shortest_path_default_goes_left_from_060_to_290(self) -> None:
+        profile = HeadingHoldProfile(heading_deg=290.0)
+        contribution = profile.contribute(self._make_state(60.0), 0.2, None)
+        self.assertLess(contribution.target_bank_deg, 0.0)
+
+    def test_forced_right_direction_banks_right_even_when_left_is_shorter(self) -> None:
+        profile = HeadingHoldProfile(heading_deg=290.0, turn_direction="right")
+        contribution = profile.contribute(self._make_state(60.0), 0.2, None)
+        self.assertGreater(contribution.target_bank_deg, 0.0)
+
+    def test_forced_left_direction_banks_left_even_when_right_is_shorter(self) -> None:
+        profile = HeadingHoldProfile(heading_deg=100.0, turn_direction="left")
+        # Short path from 060 to 100 is right (+40). Forced left should go -320.
+        contribution = profile.contribute(self._make_state(60.0), 0.2, None)
+        self.assertLess(contribution.target_bank_deg, 0.0)
+
+    def test_direction_lock_clears_once_within_tolerance(self) -> None:
+        profile = HeadingHoldProfile(heading_deg=290.0, turn_direction="right")
+        # Start far from target, then simulate arrival
+        profile.contribute(self._make_state(60.0), 0.2, None)
+        self.assertEqual(profile._direction_lock, "right")
+        # Now a state near the target should clear the lock
+        profile.contribute(self._make_state(288.0), 0.2, None)
+        self.assertIsNone(profile._direction_lock)
+
+    def test_invalid_direction_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            HeadingHoldProfile(heading_deg=270.0, turn_direction="backwards")
+
+
+class TakeoffHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.pilot = PilotCore(self.config)
+
+    def test_takeoff_roll_guidance_goes_full_power(self) -> None:
+        gt = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        self.assertEqual(gt.throttle_limit, (1.0, 1.0))
+        self.assertEqual(gt.lateral_mode, LateralMode.ROLLOUT_CENTERLINE)
+        self.assertEqual(gt.target_pitch_deg, 0.0)
+        self.assertEqual(gt.target_speed_kt, self.config.performance.vr_kt)
+
+    def test_rotate_guidance_commands_rotate_pitch_at_vy(self) -> None:
+        gt = build_rotate_guidance(self.config, self.pilot.runway_frame)
+        self.assertEqual(gt.throttle_limit, (1.0, 1.0))
+        self.assertEqual(gt.target_pitch_deg, 8.0)
+        self.assertEqual(gt.target_speed_kt, self.config.performance.vy_kt)
+        self.assertEqual(gt.lateral_mode, LateralMode.PATH_FOLLOW)
+
+
+class TakeoffProfileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.pilot = PilotCore(self.config)
+
+    def test_takeoff_profile_owns_all_three_axes(self) -> None:
+        self.assertEqual(
+            TakeoffProfile.owns,
+            frozenset({Axis.LATERAL, Axis.VERTICAL, Axis.SPEED}),
+        )
+
+    def test_engaging_takeoff_displaces_all_three_idle_profiles(self) -> None:
+        displaced = self.pilot.engage_profile(TakeoffProfile(self.config, self.pilot.runway_frame))
+        self.assertEqual(set(displaced), {"idle_lateral", "idle_vertical", "idle_speed"})
+        self.assertEqual(self.pilot.list_profile_names(), ["takeoff"])
+
+    def test_engaging_takeoff_displaces_pattern_fly(self) -> None:
+        self.pilot.engage_profile(PatternFlyProfile(self.config, self.pilot.runway_frame))
+        displaced = self.pilot.engage_profile(TakeoffProfile(self.config, self.pilot.runway_frame))
+        self.assertEqual(displaced, ["pattern_fly"])
+        self.assertEqual(self.pilot.list_profile_names(), ["takeoff"])
+
+    def test_takeoff_starts_in_preflight_and_advances_on_acceleration(self) -> None:
+        from sim_pilot.sim.scenario import ScenarioRunner
+        # Reuse the simple-backend scenario runner but engage TakeoffProfile instead of
+        # PatternFlyProfile so we can observe phase progression without pattern-flying
+        # to completion.
+        config = self.config
+        runner_pilot = PilotCore(config)
+        takeoff = TakeoffProfile(config, runner_pilot.runway_frame)
+        runner_pilot.engage_profile(takeoff)
+        # Drive the simple-model dynamics directly for a handful of ticks
+        from sim_pilot.sim.simple_dynamics import SimpleAircraftModel
+        from sim_pilot.core.types import Vec2
+        model = SimpleAircraftModel(config, Vec2(0.0, 0.0))
+        raw_state = model.initial_state()
+        # Initially we should be in PREFLIGHT
+        self.assertEqual(takeoff.phase, FlightPhase.PREFLIGHT)
+        # After a few ticks with full power (which takeoff commands), we should
+        # advance through TAKEOFF_ROLL → ROTATE → (ultimately) something airborne.
+        phases_seen: set[FlightPhase] = set()
+        for _ in range(200):
+            _, commands = runner_pilot.update(raw_state, 0.2)
+            phases_seen.add(takeoff.phase)
+            raw_state = model.step(raw_state, commands, 0.2)
+            if takeoff.phase is FlightPhase.INITIAL_CLIMB:
+                break
+        self.assertIn(FlightPhase.TAKEOFF_ROLL, phases_seen)
+        self.assertIn(FlightPhase.ROTATE, phases_seen)
+        self.assertIn(FlightPhase.INITIAL_CLIMB, phases_seen)
+
+    def test_takeoff_profile_does_not_auto_disengage(self) -> None:
+        takeoff = TakeoffProfile(self.config, self.pilot.runway_frame)
+        self.pilot.engage_profile(takeoff)
+        # Manually force the profile into INITIAL_CLIMB; it should stay engaged
+        # and keep producing guidance.
+        takeoff.phase = FlightPhase.INITIAL_CLIMB
+        self.assertEqual(self.pilot.list_profile_names(), ["takeoff"])
 
 
 if __name__ == "__main__":

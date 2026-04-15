@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Editor / session state
+.claude/
+
+# Transient run output (CSV logs, SVG plots)
+output/
+
+# Local secrets
+.env

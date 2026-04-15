@@ -176,6 +176,15 @@ class XPlaneWebBridge:
             }
         )
 
+    def get_dataref_value(self, name: str) -> float | None:
+        """Return the most recently cached value for a subscribed dataref, or None.
+
+        Read-only accessor over the WebSocket-streamed cache. Useful for tools
+        that want a one-shot value (lat/lon, COM frequency, etc.) without
+        reaching into the private cache directly.
+        """
+        return self._cached_values.get(name)
+
     def write_dataref_values(self, updates: dict[str, float | int]) -> None:
         """Write arbitrary datarefs by name. Resolves unknown dataref IDs on demand.
 

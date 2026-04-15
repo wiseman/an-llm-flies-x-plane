@@ -104,16 +104,44 @@ class IdleSpeedProfile:
 
 
 class HeadingHoldProfile:
+    """Hold a target ground track.
+
+    ``turn_direction`` can be ``"left"``, ``"right"``, or ``None`` (default).
+    When None, the profile takes the shortest-path turn to the target. When
+    set to ``"left"`` or ``"right"``, the initial turn is forced in that
+    direction even if the other way is shorter; once the aircraft is within
+    a few degrees of the target the lock clears so normal shortest-path
+    tracking resumes (no endless spinning past the target).
+    """
+
     name: ClassVar[str] = "heading_hold"
     owns: ClassVar[frozenset[Axis]] = frozenset({Axis.LATERAL})
 
-    def __init__(self, heading_deg: float, max_bank_deg: float = 25.0) -> None:
+    def __init__(
+        self,
+        heading_deg: float,
+        max_bank_deg: float = 25.0,
+        turn_direction: str | None = None,
+    ) -> None:
         self.heading_deg = float(heading_deg) % 360.0
         self.max_bank_deg = float(max_bank_deg)
+        normalized = (turn_direction or "").lower() or None
+        if normalized not in (None, "left", "right"):
+            raise ValueError(f"turn_direction must be None, 'left', or 'right'; got {turn_direction!r}")
+        self._direction_lock: str | None = normalized
 
     def contribute(self, state: AircraftState, dt: float, pilot: "PilotCore") -> ProfileContribution:
-        heading_error_deg = wrap_degrees_180(self.heading_deg - state.track_deg)
-        target_bank_deg = clamp(heading_error_deg * 0.35, -self.max_bank_deg, self.max_bank_deg)
+        raw_error = (self.heading_deg - state.track_deg) % 360.0
+        short_error = raw_error - 360.0 if raw_error > 180.0 else raw_error
+        if abs(short_error) < 5.0:
+            self._direction_lock = None
+        if self._direction_lock == "right":
+            effective_error = raw_error if raw_error > 0.0 else 0.0
+        elif self._direction_lock == "left":
+            effective_error = raw_error - 360.0 if raw_error > 0.0 else 0.0
+        else:
+            effective_error = short_error
+        target_bank_deg = clamp(effective_error * 0.35, -self.max_bank_deg, self.max_bank_deg)
         return ProfileContribution(
             lateral_mode=LateralMode.TRACK_HOLD,
             target_track_deg=self.heading_deg,
@@ -146,6 +174,95 @@ class SpeedHoldProfile:
 
     def contribute(self, state: AircraftState, dt: float, pilot: "PilotCore") -> ProfileContribution:
         return ProfileContribution(target_speed_kt=self.speed_kt)
+
+
+def build_takeoff_roll_guidance(config: ConfigBundle, runway_frame: RunwayFrame) -> GuidanceTargets:
+    """Full-power takeoff roll: centerline hold, wings level, pitch neutral, target Vr."""
+    return GuidanceTargets(
+        lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
+        vertical_mode=VerticalMode.PITCH_HOLD,
+        target_bank_deg=0.0,
+        target_heading_deg=runway_frame.runway.course_deg,
+        target_pitch_deg=0.0,
+        target_speed_kt=config.performance.vr_kt,
+        throttle_limit=(1.0, 1.0),
+    )
+
+
+def build_rotate_guidance(config: ConfigBundle, runway_frame: RunwayFrame) -> GuidanceTargets:
+    """Rotation: full power, pitch up to initial climb attitude, path follow the runway centerline extension."""
+    return GuidanceTargets(
+        lateral_mode=LateralMode.PATH_FOLLOW,
+        vertical_mode=VerticalMode.PITCH_HOLD,
+        target_path=runway_frame.departure_leg(),
+        target_bank_deg=0.0,
+        target_pitch_deg=8.0,
+        target_speed_kt=config.performance.vy_kt,
+        throttle_limit=(1.0, 1.0),
+    )
+
+
+class TakeoffProfile:
+    """Runs the takeoff sequence: roll, rotate, initial climb straight ahead at Vy.
+
+    Owns all three axes. Uses an internal ``ModeManager`` to advance through
+    PREFLIGHT → TAKEOFF_ROLL → ROTATE → INITIAL_CLIMB. Once in INITIAL_CLIMB it
+    holds a simple "climb-straight-on-runway-track at Vy" profile indefinitely
+    — it does NOT auto-disengage. Transition out by engaging a different
+    profile (``heading_hold``, ``altitude_hold``, ``pattern_fly``, …); those
+    engagements displace this profile via axis-ownership conflict.
+    """
+
+    name: ClassVar[str] = "takeoff"
+    owns: ClassVar[frozenset[Axis]] = frozenset({Axis.LATERAL, Axis.VERTICAL, Axis.SPEED})
+
+    def __init__(self, config: ConfigBundle, runway_frame: RunwayFrame) -> None:
+        self.config = config
+        self.runway_frame = runway_frame
+        self.phase: FlightPhase = FlightPhase.PREFLIGHT
+        self.mode_manager = ModeManager(config)
+        self.safety_monitor = SafetyMonitor(config)
+        self._pattern_geometry_stub = build_pattern_geometry(
+            runway_frame,
+            downwind_offset_ft=config.pattern.downwind_offset_ft,
+            extension_ft=config.pattern.default_extension_ft,
+        )
+        self._route_stub = RouteManager([])
+
+    def contribute(self, state: AircraftState, dt: float, pilot: "PilotCore") -> ProfileContribution:
+        safety_status = self.safety_monitor.evaluate(state, self.phase)
+        self.phase = self.mode_manager.update(
+            self.phase,
+            state,
+            self._route_stub,
+            self._pattern_geometry_stub,
+            safety_status,
+        )
+        if self.phase is FlightPhase.TAKEOFF_ROLL:
+            guidance = build_takeoff_roll_guidance(self.config, self.runway_frame)
+        elif self.phase is FlightPhase.ROTATE:
+            guidance = build_rotate_guidance(self.config, self.runway_frame)
+        elif self.phase in {FlightPhase.INITIAL_CLIMB, FlightPhase.ENROUTE_CLIMB, FlightPhase.CRUISE}:
+            guidance = GuidanceTargets(
+                lateral_mode=LateralMode.TRACK_HOLD,
+                vertical_mode=VerticalMode.TECS,
+                target_bank_deg=0.0,
+                target_track_deg=self.runway_frame.runway.course_deg,
+                target_heading_deg=self.runway_frame.runway.course_deg,
+                target_altitude_ft=self.config.cruise_altitude_ft,
+                target_speed_kt=self.config.performance.vy_kt,
+                throttle_limit=(0.9, 1.0),
+            )
+        else:
+            guidance = GuidanceTargets(
+                lateral_mode=LateralMode.BANK_HOLD,
+                vertical_mode=VerticalMode.PITCH_HOLD,
+                target_bank_deg=0.0,
+                target_pitch_deg=0.0,
+                throttle_limit=(0.0, 0.0),
+            )
+        guidance = self.safety_monitor.apply_limits(guidance, self.phase)
+        return _guidance_to_contribution(guidance)
 
 
 class PatternFlyProfile:
@@ -233,25 +350,9 @@ class PatternFlyProfile:
     def _guidance_for_phase(self, state: AircraftState, phase: FlightPhase) -> GuidanceTargets:
         bank_limit_deg = self.safety_monitor.bank_limit_deg(phase)
         if phase is FlightPhase.TAKEOFF_ROLL:
-            return GuidanceTargets(
-                lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
-                vertical_mode=VerticalMode.PITCH_HOLD,
-                target_bank_deg=0.0,
-                target_heading_deg=self.runway_frame.runway.course_deg,
-                target_pitch_deg=0.0,
-                target_speed_kt=self.config.performance.vr_kt,
-                throttle_limit=(1.0, 1.0),
-            )
+            return build_takeoff_roll_guidance(self.config, self.runway_frame)
         if phase is FlightPhase.ROTATE:
-            return GuidanceTargets(
-                lateral_mode=LateralMode.PATH_FOLLOW,
-                vertical_mode=VerticalMode.PITCH_HOLD,
-                target_path=self.runway_frame.departure_leg(),
-                target_bank_deg=0.0,
-                target_pitch_deg=8.0,
-                target_speed_kt=self.config.performance.vy_kt,
-                throttle_limit=(1.0, 1.0),
-            )
+            return build_rotate_guidance(self.config, self.runway_frame)
         if phase in {FlightPhase.INITIAL_CLIMB, FlightPhase.ENROUTE_CLIMB, FlightPhase.CRUISE, FlightPhase.DESCENT, FlightPhase.GO_AROUND}:
             waypoint = self.route_manager.active_waypoint()
             desired_track_deg = state.track_deg

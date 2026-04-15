@@ -6,7 +6,7 @@ from typing import Sequence
 
 from sim_pilot.core.config import load_default_config_bundle
 from sim_pilot.core.types import Vec2
-from sim_pilot.live_runner import LiveRunConfig, apply_live_config_overrides, bootstrap_live_config_from_sim, run_live_xplane
+from sim_pilot.live_runner import LiveRunConfig, run_live_xplane
 from sim_pilot.sim.logging import write_scenario_log_csv
 from sim_pilot.sim.plotting import write_scenario_plots
 from sim_pilot.sim.scenario import ScenarioRunner
@@ -69,53 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="TCP port that the X-Plane 12 web server is listening on.",
     )
     parser.add_argument(
-        "--threshold-lat-deg",
-        type=float,
-        default=None,
-        help="Runway threshold latitude for live X-Plane runs.",
-    )
-    parser.add_argument(
-        "--threshold-lon-deg",
-        type=float,
-        default=None,
-        help="Runway threshold longitude for live X-Plane runs.",
-    )
-    parser.add_argument(
-        "--bootstrap-from-sim",
-        "--takeoff-from-here",
-        dest="bootstrap_from_sim",
-        action="store_true",
-        help="Probe the current X-Plane aircraft position and heading, treat that as the runway reference, and start the pilot from there.",
-    )
-    parser.add_argument(
-        "--airport",
-        type=str,
-        default=None,
-        help="Override the airport code used by the live pilot core.",
-    )
-    parser.add_argument(
-        "--runway-id",
-        type=str,
-        default=None,
-        help="Override the runway identifier used by the live pilot core.",
-    )
-    parser.add_argument(
-        "--runway-course-deg",
-        type=float,
-        default=None,
-        help="Override the runway magnetic/true course in degrees used by the live pilot core.",
-    )
-    parser.add_argument(
-        "--field-elevation-ft",
-        type=float,
-        default=None,
-        help="Override the field elevation used by the live pilot core.",
-    )
-    parser.add_argument(
         "--llm-model",
         type=str,
-        default="gpt-5-mini",
-        help="OpenAI model used to interpret ATC/operator messages for live X-Plane runs.",
+        default="gpt-5.4-2026-03-05",
+        help="OpenAI model used to interpret ATC/operator messages for live X-Plane runs. Pinned to the 2026-03-05 snapshot so behavior is stable; override with e.g. --llm-model gpt-5.4-mini-2026-03-17 for faster/cheaper inference or --llm-model gpt-5.4-pro-2026-03-05 for the smarter variant.",
     )
     parser.add_argument(
         "--atc-message",
@@ -147,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("idle", "pattern_fly"),
         help="Guidance profile to engage at startup. `idle` leaves the pilot in wings-level / idle-throttle until the LLM engages a profile; `pattern_fly` starts the deterministic mission pilot immediately.",
     )
+    parser.add_argument(
+        "--runway-csv-path",
+        type=Path,
+        default=Path.home() / "data" / "runways.csv",
+        help="Path to the runway/airport CSV that the LLM's sql_query tool reads via DuckDB (with the spatial extension loaded). The CSV is read directly — no separate build step.",
+    )
     return parser
 
 
@@ -166,52 +129,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.backend == "xplane":
         if args.log_csv is not None or args.plots_dir is not None:
             raise SystemExit("Live X-Plane runs do not yet support --log-csv or --plots-dir.")
-        if args.bootstrap_from_sim:
-            live_config, threshold_lat_deg, threshold_lon_deg = bootstrap_live_config_from_sim(
-                config,
-                host=args.xplane_host,
-                xplane_port=args.xplane_port,
-                airport=args.airport,
-                runway_id=args.runway_id,
-                runway_course_deg=args.runway_course_deg,
-                field_elevation_ft=args.field_elevation_ft,
-            )
-        else:
-            if args.threshold_lat_deg is None or args.threshold_lon_deg is None:
-                raise SystemExit("--backend xplane requires either --bootstrap-from-sim or both --threshold-lat-deg and --threshold-lon-deg.")
-            threshold_lat_deg = args.threshold_lat_deg
-            threshold_lon_deg = args.threshold_lon_deg
-            live_config = apply_live_config_overrides(
-                config,
-                airport=args.airport,
-                runway_id=args.runway_id,
-                runway_course_deg=args.runway_course_deg,
-                field_elevation_ft=args.field_elevation_ft,
-            )
         print("backend=xplane")
-        print(f"bootstrap_from_sim={str(args.bootstrap_from_sim).lower()}")
-        print(f"airport={live_config.airport.airport}")
-        print(f"runway_id={live_config.airport.runway.id}")
-        print(f"runway_course_deg={live_config.airport.runway.course_deg:.1f}")
-        print(f"field_elevation_ft={live_config.airport.field_elevation_ft:.1f}")
-        print(f"threshold_lat_deg={threshold_lat_deg:.6f}")
-        print(f"threshold_lon_deg={threshold_lon_deg:.6f}")
         print(f"xplane_host={args.xplane_host}")
         print(f"xplane_port={args.xplane_port}")
         print(f"llm_model={args.llm_model}")
         run_live_xplane(
-            live_config,
+            config,
             LiveRunConfig(
                 xplane_host=args.xplane_host,
                 xplane_port=args.xplane_port,
-                threshold_lat_deg=threshold_lat_deg,
-                threshold_lon_deg=threshold_lon_deg,
                 llm_model=args.llm_model,
                 atc_messages=tuple(args.atc_message),
                 interactive_atc=args.interactive_atc,
                 control_hz=args.control_hz,
                 status_interval_s=args.status_interval_s,
                 engage_profile=args.engage_profile,
+                runway_csv_path=args.runway_csv_path,
             ),
         )
         return

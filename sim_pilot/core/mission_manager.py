@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import threading
 
 from sim_pilot.control.bank_hold import BankController, CoordinationController
@@ -202,6 +203,7 @@ class PilotCore:
             rudder = self.rollout_controller.update(
                 centerline_error_ft=state.centerline_error_ft or 0.0,
                 track_error_deg=track_error_deg,
+                yaw_rate_deg_s=math.degrees(state.r_rad_s),
                 gs_kt=state.gs_kt,
             )
             aileron = self.bank_controller.update(0.0, state.roll_deg, state.p_rad_s, state.dt)

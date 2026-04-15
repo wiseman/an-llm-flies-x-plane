@@ -123,7 +123,7 @@ class Waypoint:
 
 @dataclass(slots=True, frozen=True)
 class Runway:
-    id: str
+    id: str | None
     threshold_ft: Vec2
     course_deg: float
     length_ft: float

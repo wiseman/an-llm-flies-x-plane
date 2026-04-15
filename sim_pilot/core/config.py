@@ -139,7 +139,7 @@ class MissionConfig:
 
 @dataclass(slots=True, frozen=True)
 class AirportConfig:
-    airport: str
+    airport: str | None
     field_elevation_ft: float
     runway: Runway
     mission: MissionConfig

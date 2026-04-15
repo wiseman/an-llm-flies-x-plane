@@ -118,6 +118,44 @@ class CompactionTests(unittest.TestCase):
 
 
 class RunConversationLoopTests(unittest.TestCase):
+    def test_tool_call_log_lands_on_bus_when_provided(self) -> None:
+        from sim_pilot.bus import SimBus
+        ctx = _make_ctx()
+        bus = SimBus(echo=False)
+        script = [
+            {"output": [_function_call("engage_heading_hold", {"heading_deg": 90.0})]},
+            {"output": [_text_message("heading 090 engaged")]},
+        ]
+        client = StubClient(script)
+        q: "queue.Queue[IncomingMessage]" = queue.Queue()
+        q.put(IncomingMessage(source="operator", text="fly heading 090"))
+        stop = threading.Event()
+
+        worker = threading.Thread(
+            target=run_conversation_loop,
+            kwargs={
+                "client": client,
+                "tool_context": ctx,
+                "input_queue": q,
+                "stop_event": stop,
+                "bus": bus,
+            },
+            daemon=True,
+        )
+        worker.start()
+        for _ in range(50):
+            if len(client.calls) >= 2:
+                break
+            threading.Event().wait(0.05)
+        stop.set()
+        worker.join(timeout=2.0)
+
+        _, logs, _ = bus.snapshot()
+        tool_log_lines = [line for line in logs if "engage_heading_hold" in line]
+        assistant_lines = [line for line in logs if line.startswith("[llm]")]
+        self.assertTrue(tool_log_lines, f"expected tool log lines in bus, got: {logs}")
+        self.assertTrue(assistant_lines, f"expected [llm] assistant text in bus, got: {logs}")
+
     def test_single_tool_call_then_text_ends_turn(self) -> None:
         ctx = _make_ctx()
         script = [

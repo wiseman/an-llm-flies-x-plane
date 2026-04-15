@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
+from pathlib import Path
 from typing import Any, Callable
+
+import duckdb
 
 from sim_pilot.core.config import ConfigBundle
 from sim_pilot.core.mission_manager import PilotCore, StatusSnapshot
@@ -13,8 +16,16 @@ from sim_pilot.core.profiles import (
     PatternFlyProfile,
     RouteFollowProfile,
     SpeedHoldProfile,
+    TakeoffProfile,
 )
-from sim_pilot.sim.datarefs import COM1_FREQUENCY_HZ_833, COM2_FREQUENCY_HZ_833
+from sim_pilot.bus import SimBus
+from sim_pilot.sim.datarefs import (
+    COM1_FREQUENCY_HZ_833,
+    COM2_FREQUENCY_HZ_833,
+    LATITUDE_DEG,
+    LONGITUDE_DEG,
+    PARKING_BRAKE_RATIO,
+)
 from sim_pilot.sim.xplane_bridge import XPlaneWebBridge
 
 
@@ -24,6 +35,12 @@ class ToolContext:
     bridge: XPlaneWebBridge | None
     config: ConfigBundle
     recent_broadcasts: list[str]
+    runway_csv_path: Path | None = None
+    bus: SimBus | None = None
+    _runway_conn: duckdb.DuckDBPyConnection | None = field(default=None, repr=False)
+
+
+SQL_QUERY_MAX_ROWS = 50
 
 
 ToolHandler = Callable[..., str]
@@ -44,15 +61,21 @@ def _find_pattern_profile(ctx: ToolContext) -> PatternFlyProfile | None:
     return None
 
 
-def _status_json(snapshot: StatusSnapshot | None) -> str:
+def _status_json(snapshot: StatusSnapshot | None, ctx: "ToolContext") -> str:
     if snapshot is None:
         return json.dumps({"status": "uninitialized"})
     state = snapshot.state
+    lat_deg: float | None = None
+    lon_deg: float | None = None
+    if ctx.bridge is not None:
+        lat_deg = ctx.bridge.get_dataref_value(LATITUDE_DEG.name)
+        lon_deg = ctx.bridge.get_dataref_value(LONGITUDE_DEG.name)
     payload: dict[str, Any] = {
         "t_sim": round(state.t_sim, 2),
         "active_profiles": list(snapshot.active_profiles),
         "phase": snapshot.phase.value if snapshot.phase is not None else None,
-        "position_ft": {"x": round(state.position_ft.x, 1), "y": round(state.position_ft.y, 1)},
+        "lat_deg": round(lat_deg, 6) if lat_deg is not None else None,
+        "lon_deg": round(lon_deg, 6) if lon_deg is not None else None,
         "alt_msl_ft": round(state.alt_msl_ft, 1),
         "alt_agl_ft": round(state.alt_agl_ft, 1),
         "ias_kt": round(state.ias_kt, 1),
@@ -66,9 +89,6 @@ def _status_json(snapshot: StatusSnapshot | None) -> str:
         "throttle_pos": round(state.throttle_pos, 2),
         "flap_index": state.flap_index,
         "gear_down": state.gear_down,
-        "runway_id": state.runway_id,
-        "runway_x_ft": round(state.runway_x_ft, 1) if state.runway_x_ft is not None else None,
-        "runway_y_ft": round(state.runway_y_ft, 1) if state.runway_y_ft is not None else None,
     }
     return json.dumps(payload)
 
@@ -76,20 +96,29 @@ def _status_json(snapshot: StatusSnapshot | None) -> str:
 # ---- tools ----
 
 def tool_get_status(ctx: ToolContext) -> str:
-    return _status_json(ctx.pilot.latest_snapshot)
+    return _status_json(ctx.pilot.latest_snapshot, ctx)
 
 
 def tool_sleep(ctx: ToolContext) -> str:
     return "sleeping; waiting for next external message"
 
 
-def tool_engage_heading_hold(ctx: ToolContext, heading_deg: float) -> str:
-    profile = HeadingHoldProfile(
-        heading_deg=heading_deg,
-        max_bank_deg=ctx.config.limits.max_bank_enroute_deg,
-    )
+def tool_engage_heading_hold(
+    ctx: ToolContext,
+    heading_deg: float,
+    turn_direction: str | None = None,
+) -> str:
+    try:
+        profile = HeadingHoldProfile(
+            heading_deg=heading_deg,
+            max_bank_deg=ctx.config.limits.max_bank_enroute_deg,
+            turn_direction=turn_direction,
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
     displaced = ctx.pilot.engage_profile(profile)
-    return f"engaged heading_hold heading={profile.heading_deg:.1f}deg{_format_displaced(displaced)}"
+    direction_note = f" via {turn_direction}" if turn_direction else ""
+    return f"engaged heading_hold heading={profile.heading_deg:.1f}deg{direction_note}{_format_displaced(displaced)}"
 
 
 def tool_engage_altitude_hold(ctx: ToolContext, altitude_ft: float) -> str:
@@ -104,13 +133,118 @@ def tool_engage_speed_hold(ctx: ToolContext, speed_kt: float) -> str:
     return f"engaged speed_hold speed={profile.speed_kt:.0f}kt{_format_displaced(displaced)}"
 
 
+def _pilot_reference_label(ctx: ToolContext) -> str:
+    parts = []
+    if ctx.config.airport.airport:
+        parts.append(f"airport={ctx.config.airport.airport}")
+    if ctx.config.airport.runway.id:
+        parts.append(f"runway={ctx.config.airport.runway.id}")
+    parts.append(f"course={ctx.config.airport.runway.course_deg:.0f}deg")
+    return " ".join(parts)
+
+
 def tool_engage_pattern_fly(ctx: ToolContext) -> str:
     profile = PatternFlyProfile(ctx.config, ctx.pilot.runway_frame)
     displaced = ctx.pilot.engage_profile(profile)
-    return (
-        f"engaged pattern_fly airport={ctx.config.airport.airport} "
-        f"runway={ctx.config.airport.runway.id}{_format_displaced(displaced)}"
+    return f"engaged pattern_fly {_pilot_reference_label(ctx)}{_format_displaced(displaced)}"
+
+
+def _parking_brake_ratio(ctx: ToolContext) -> float | None:
+    if ctx.bridge is None:
+        return None
+    value = ctx.bridge.get_dataref_value(PARKING_BRAKE_RATIO.name)
+    return None if value is None else float(value)
+
+
+def tool_takeoff_checklist(ctx: ToolContext) -> str:
+    snapshot = ctx.pilot.latest_snapshot
+    if snapshot is None:
+        return (
+            "error: no aircraft state yet — call get_status first so the control "
+            "loop publishes a snapshot."
+        )
+    state = snapshot.state
+    lines: list[str] = ["TAKEOFF CHECKLIST — address every [ACTION] item before engage_takeoff:"]
+    action_needed = False
+
+    pb_value = _parking_brake_ratio(ctx)
+    if pb_value is None:
+        lines.append(
+            "  [?]      parking brake: state unavailable — call "
+            "set_parking_brake(engaged=False) to be safe"
+        )
+        action_needed = True
+    elif pb_value >= 0.5:
+        lines.append(
+            f"  [ACTION] parking brake: SET (ratio={pb_value:.2f}) — call "
+            f"set_parking_brake(engaged=False)"
+        )
+        action_needed = True
+    else:
+        lines.append(f"  [OK]     parking brake: released (ratio={pb_value:.2f})")
+
+    if state.flap_index <= 10:
+        lines.append(f"  [OK]     flaps: {state.flap_index} deg")
+    else:
+        lines.append(
+            f"  [ACTION] flaps: {state.flap_index} deg — set 0 or 10 for normal takeoff "
+            f"(tool: currently none — leave flaps alone or change via your flight-controls "
+            f"of choice if you add a flap tool)"
+        )
+        action_needed = True
+
+    if state.gear_down:
+        lines.append("  [OK]     gear: down")
+    else:
+        lines.append("  [ACTION] gear: up — extend the gear before takeoff")
+        action_needed = True
+
+    if state.on_ground:
+        lines.append("  [OK]     on ground")
+    else:
+        lines.append("  [ERROR]  not on ground — you cannot engage_takeoff from the air")
+        action_needed = True
+
+    if state.ias_kt > 5.0:
+        lines.append(
+            f"  [?]      already rolling at {state.ias_kt:.1f} kt IAS — double-check you "
+            f"meant to call this"
+        )
+
+    already_running = [p for p in snapshot.active_profiles if p in {"takeoff", "pattern_fly"}]
+    if already_running:
+        lines.append(f"  [INFO]   already engaged: {', '.join(already_running)}")
+
+    lines.append(
+        "  [REMINDER] identify the runway you are on (get_status for lat/lon + heading, then "
+        "sql_query with the 'What runway am I on?' example) before committing to the roll"
     )
+    lines.append(
+        "  [REMINDER] acknowledge takeoff clearance on the radio (broadcast_on_radio) if ATC "
+        "has issued one"
+    )
+
+    lines.append("")
+    if action_needed:
+        lines.append(
+            "One or more items need action. Fix them, then re-run this checklist or proceed "
+            "to engage_takeoff."
+        )
+    else:
+        lines.append("All items OK. Call engage_takeoff() to begin the roll.")
+    return "\n".join(lines)
+
+
+def tool_engage_takeoff(ctx: ToolContext) -> str:
+    pb_value = _parking_brake_ratio(ctx)
+    if pb_value is not None and pb_value >= 0.5:
+        return (
+            f"error: parking brake is SET (ratio={pb_value:.2f}) — call "
+            f"set_parking_brake(engaged=False) first, then retry engage_takeoff"
+        )
+    profile = TakeoffProfile(ctx.config, ctx.pilot.runway_frame)
+    displaced = ctx.pilot.engage_profile(profile)
+    return f"engaged takeoff {_pilot_reference_label(ctx)}{_format_displaced(displaced)}"
 
 
 def tool_engage_approach(ctx: ToolContext, runway_id: str) -> str:
@@ -193,16 +327,79 @@ def tool_tune_radio(ctx: ToolContext, radio: str, frequency_mhz: float) -> str:
     return f"tuned {key} to {frequency_mhz:.3f} MHz (set dataref={dataref_by_radio[key]} value={frequency_khz})"
 
 
+def tool_set_parking_brake(ctx: ToolContext, engaged: bool) -> str:
+    if ctx.bridge is None:
+        return "error: no X-Plane bridge available (running in simple backend?)"
+    value = 1.0 if engaged else 0.0
+    ctx.bridge.write_dataref_values({PARKING_BRAKE_RATIO.name: value})
+    return "parking brake engaged" if engaged else "parking brake released"
+
+
 def tool_broadcast_on_radio(ctx: ToolContext, radio: str, message: str) -> str:
     key = radio.lower()
     if key not in {"com1", "com2"}:
         return f"error: unknown radio {radio!r} (expected com1, com2)"
     line = f"[BROADCAST {key}] {message}"
-    print(line, flush=True)
+    if ctx.bus is not None:
+        ctx.bus.push_radio(line)
+    else:
+        print(line, flush=True)
     ctx.recent_broadcasts.append(line)
     if len(ctx.recent_broadcasts) > 16:
         del ctx.recent_broadcasts[0 : len(ctx.recent_broadcasts) - 16]
     return f"broadcast on {key}: {message}"
+
+
+def _open_runway_duckdb(csv_path: Path) -> duckdb.DuckDBPyConnection:
+    """Open an in-memory DuckDB connection backed by the runways CSV.
+
+    Loads the spatial extension (best-effort — non-spatial queries still work
+    if the install fails), creates a private base table from the CSV, and
+    exposes a read-only ``runways`` view. Writes against the view are rejected
+    by DuckDB at bind time, which is how we keep the LLM from mutating the
+    dataset.
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        conn.execute("INSTALL spatial; LOAD spatial;")
+    except Exception:
+        # Spatial unavailable (no network on first install, etc.). Non-spatial
+        # queries still work. Spatial queries will fail with a clear error.
+        pass
+    conn.execute(
+        "CREATE TABLE _runways_data AS SELECT * FROM read_csv_auto(?, header=true, sample_size=-1)",
+        [str(csv_path)],
+    )
+    conn.execute("CREATE VIEW runways AS SELECT * FROM _runways_data")
+    return conn
+
+
+def tool_sql_query(ctx: ToolContext, query: str) -> str:
+    if ctx.runway_csv_path is None:
+        return "error: runway CSV path is not configured (pass --runway-csv-path)"
+    csv_path = ctx.runway_csv_path
+    if not csv_path.exists():
+        return f"error: runway CSV not found at {csv_path}"
+    if ctx._runway_conn is None:
+        try:
+            ctx._runway_conn = _open_runway_duckdb(csv_path)
+        except Exception as exc:
+            return f"error: could not open runway CSV: {exc}"
+    try:
+        cursor = ctx._runway_conn.execute(query)
+        column_names = [desc[0] for desc in (cursor.description or [])]
+        rows = cursor.fetchmany(SQL_QUERY_MAX_ROWS)
+        has_more = cursor.fetchone() is not None
+    except duckdb.Error as exc:
+        return f"error: {exc}"
+    if not rows:
+        return "0 rows"
+    lines = ["\t".join(column_names)]
+    for row in rows:
+        lines.append("\t".join("" if value is None else str(value) for value in row))
+    if has_more:
+        lines.append(f"(truncated at {SQL_QUERY_MAX_ROWS} rows; add LIMIT/WHERE to narrow)")
+    return "\n".join(lines)
 
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -212,6 +409,8 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "engage_altitude_hold": tool_engage_altitude_hold,
     "engage_speed_hold": tool_engage_speed_hold,
     "engage_pattern_fly": tool_engage_pattern_fly,
+    "engage_takeoff": tool_engage_takeoff,
+    "takeoff_checklist": tool_takeoff_checklist,
     "engage_approach": tool_engage_approach,
     "engage_route_follow": tool_engage_route_follow,
     "disengage_profile": tool_disengage_profile,
@@ -223,7 +422,105 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "join_pattern": tool_join_pattern,
     "tune_radio": tool_tune_radio,
     "broadcast_on_radio": tool_broadcast_on_radio,
+    "set_parking_brake": tool_set_parking_brake,
+    "sql_query": tool_sql_query,
 }
+
+
+SQL_QUERY_DESCRIPTION = """\
+Run an arbitrary read-only SQL query against the runway/airport database. This is
+the AUTHORITATIVE source for runway and airport facts — never guess a runway
+identifier, airport code, course, length, or elevation; query for it. The backend
+is DuckDB with the spatial extension loaded, so you have full ST_* geospatial
+functions available. Results are tab-separated with a header row, truncated to 50
+rows.
+
+View: runways (read-only; one row per physical runway, worldwide)
+  id BIGINT
+  airport_ref BIGINT
+  airport_ident VARCHAR        -- airport ICAO code, e.g. 'KSEA', 'EGLL'
+  length_ft BIGINT
+  width_ft BIGINT
+  surface VARCHAR              -- e.g. 'ASP', 'CONC', 'CON', 'GRVL', 'TURF', 'ASPH-G'
+  lighted BIGINT               -- 0 or 1
+  closed BIGINT                -- 0 or 1
+  le_ident VARCHAR             -- low-numbered-end runway identifier, e.g. '16L'
+  le_latitude_deg DOUBLE       -- threshold latitude at the low end
+  le_longitude_deg DOUBLE
+  le_elevation_ft BIGINT
+  le_heading_degT DOUBLE       -- runway course (true heading) from low-end threshold
+  le_displaced_threshold_ft BIGINT
+  he_ident VARCHAR             -- high-numbered-end identifier, e.g. '34R'
+  he_latitude_deg DOUBLE
+  he_longitude_deg DOUBLE
+  he_elevation_ft BIGINT
+  he_heading_degT DOUBLE
+  he_displaced_threshold_ft BIGINT
+
+Spatial functions (DuckDB spatial extension): ST_Point(lon, lat) — note that
+LONGITUDE comes first — plus ST_Distance_Sphere(p1, p2) which returns meters
+along the great circle. Use these for "nearest runway", "within N nm", etc.
+Other ST_* functions (ST_Distance, ST_DWithin, ST_AsGeoJSON) are also available.
+
+Common queries:
+
+  -- "What runway am I on?" / "Where am I?" — call get_status first to get
+  -- your lat/lon AND heading, then run this with all three substituted in.
+  -- IMPORTANT details baked into this query (do not skip any of them):
+  --   * each runway row stores BOTH ends (le_* and he_*); the LEAST() of the
+  --     two spatial distances is your distance to the nearest threshold on
+  --     that runway, which matters when you're sitting at the high-numbered
+  --     end (e.g. 34R, whose threshold is in the he_* columns).
+  --   * active_ident is computed in SQL from cos(heading - end_heading).
+  --     cos handles angular wraparound automatically: heading 0.6 is next
+  --     to 360 (cos ~ +1), not across from it. Do NOT compute this column
+  --     in your head — read it from the query result.
+  --   * no bounding box. ORDER BY the spatial distance over the whole
+  --     table. DuckDB scans 43k rows in milliseconds.
+  SELECT airport_ident, le_ident, he_ident, length_ft, surface,
+         le_heading_degT, he_heading_degT,
+         LEAST(
+           ST_Distance_Sphere(ST_Point(le_longitude_deg, le_latitude_deg),
+                              ST_Point(<lon>, <lat>)),
+           ST_Distance_Sphere(ST_Point(he_longitude_deg, he_latitude_deg),
+                              ST_Point(<lon>, <lat>))
+         ) AS dist_m,
+         CASE
+           WHEN cos(radians(le_heading_degT - <hdg>)) >
+                cos(radians(he_heading_degT - <hdg>))
+           THEN le_ident
+           ELSE he_ident
+         END AS active_ident
+  FROM runways
+  WHERE closed = 0
+    AND le_latitude_deg IS NOT NULL
+    AND he_latitude_deg IS NOT NULL
+  ORDER BY dist_m
+  LIMIT 5;
+
+  -- The runway you are on is the top row's active_ident column, provided
+  -- dist_m is small (< ~100 m if you're actually on a runway). Do not pick
+  -- le_ident or he_ident yourself — always read active_ident.
+
+  -- All active runways at a known airport
+  SELECT airport_ident, le_ident, he_ident, length_ft, surface,
+         le_heading_degT, he_heading_degT
+  FROM runways WHERE airport_ident = 'KSEA' AND closed = 0;
+
+  -- Nearest paved runway at least 5000 ft long (both ends checked)
+  SELECT airport_ident, le_ident, he_ident, length_ft, surface,
+         LEAST(
+           ST_Distance_Sphere(ST_Point(le_longitude_deg, le_latitude_deg),
+                              ST_Point(<lon>, <lat>)),
+           ST_Distance_Sphere(ST_Point(he_longitude_deg, he_latitude_deg),
+                              ST_Point(<lon>, <lat>))
+         ) / 1852.0 AS dist_nm
+  FROM runways
+  WHERE closed = 0 AND length_ft >= 5000 AND surface IN ('ASP', 'CONC', 'CON')
+    AND le_latitude_deg IS NOT NULL AND he_latitude_deg IS NOT NULL
+  ORDER BY dist_nm
+  LIMIT 5;
+"""
 
 
 def _fn_schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -256,9 +553,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _fn_schema(
         "engage_heading_hold",
-        "Engage heading-hold on the lateral axis. Displaces any other lateral-axis profile.",
-        {"heading_deg": {"type": "number", "description": "Target heading in degrees true, 0-360."}},
-        ["heading_deg"],
+        "Engage heading-hold on the lateral axis. Displaces any other lateral-axis profile. By default takes the shortest-path turn to the target heading. If the operator or ATC specifies a turn direction (e.g. 'turn right to 290'), pass turn_direction='right' or 'left' to force that direction even when the other way is shorter; the direction lock clears automatically once within 5 degrees of target so the autopilot will not overshoot.",
+        {
+            "heading_deg": {"type": "number", "description": "Target heading in degrees true, 0-360."},
+            "turn_direction": {
+                "type": ["string", "null"],
+                "enum": ["left", "right", None],
+                "description": "Optional forced turn direction: 'left', 'right', or null for shortest-path (default).",
+            },
+        },
+        ["heading_deg", "turn_direction"],
     ),
     _fn_schema(
         "engage_altitude_hold",
@@ -275,6 +579,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     _fn_schema(
         "engage_pattern_fly",
         "Engage the deterministic mission pilot. Owns all three axes and covers takeoff through landing using the configured airport's phase machine.",
+        {},
+        [],
+    ),
+    _fn_schema(
+        "engage_takeoff",
+        "Start the takeoff sequence: full power, accelerate on the runway centerline, rotate at Vr, then hold a straight-ahead climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set; call takeoff_checklist first to see what needs to be fixed.",
+        {},
+        [],
+    ),
+    _fn_schema(
+        "takeoff_checklist",
+        "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Call this before engage_takeoff and address every [ACTION] item — the most common miss is a set parking brake, which will also cause engage_takeoff to refuse.",
         {},
         [],
     ),
@@ -343,12 +659,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _fn_schema(
         "broadcast_on_radio",
-        "Broadcast a text message over a COM radio. Prints to the operator console; no audio synthesis.",
+        "Transmit a text message over a COM radio. This is the ONLY way your words reach ATC or anyone outside the cockpit — plain-text replies are visible to the operator only and are not transmitted. Always use this tool to acknowledge clearances, read back ATC instructions, make position calls, or make any external radio call. Use standard aviation phraseology. Typically com1 is the active comm radio.",
         {
             "radio": {"type": "string", "description": "Radio name: 'com1' or 'com2'."},
-            "message": {"type": "string", "description": "The message text to broadcast."},
+            "message": {"type": "string", "description": "The exact words to transmit, e.g. 'Seattle Tower, Cessna 123AB, runway 16L cleared for takeoff'."},
         },
         ["radio", "message"],
+    ),
+    _fn_schema(
+        "set_parking_brake",
+        "Engage or release the parking brake. Unlike the toe brakes, the parking brake holds its state without continuous input, so this is the right tool for 'set the brake and hold it'.",
+        {"engaged": {"type": "boolean", "description": "True to engage (set) the parking brake, false to release it."}},
+        ["engaged"],
+    ),
+    _fn_schema(
+        "sql_query",
+        SQL_QUERY_DESCRIPTION,
+        {"query": {"type": "string", "description": "A single SQL statement to execute."}},
+        ["query"],
     ),
 ]
 

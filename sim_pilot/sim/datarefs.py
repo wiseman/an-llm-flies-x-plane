@@ -35,6 +35,7 @@ YOKE_ROLL_RATIO = DatarefSpec("sim/joystick/yoke_roll_ratio")
 YOKE_HEADING_RATIO = DatarefSpec("sim/joystick/yoke_heading_ratio")
 LEFT_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/left_brake_ratio")
 RIGHT_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/right_brake_ratio")
+PARKING_BRAKE_RATIO = DatarefSpec("sim/cockpit2/controls/parking_brake_ratio")
 
 COM1_FREQUENCY_HZ_833 = DatarefSpec("sim/cockpit2/radios/actuators/com1_frequency_hz_833")
 COM2_FREQUENCY_HZ_833 = DatarefSpec("sim/cockpit2/radios/actuators/com2_frequency_hz_833")
@@ -59,6 +60,7 @@ STATE_DATAREFS: tuple[DatarefSpec, ...] = (
     Y_AGL_M,
     SIM_TIME_S,
     ON_GROUND_0,
+    PARKING_BRAKE_RATIO,
 )
 
 COMMAND_DATAREFS: tuple[DatarefSpec, ...] = (
