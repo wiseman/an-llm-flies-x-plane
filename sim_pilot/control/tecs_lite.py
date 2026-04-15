@@ -61,9 +61,21 @@ class TECSLite:
     @staticmethod
     def _phase_weights(phase: FlightPhase) -> tuple[float, float, float, float, float, float]:
         if phase is FlightPhase.FINAL:
-            return (0.004, 10.0, 1.2, 12.0, -6.0, 10.0)
+            # balance_altitude_weight was 1.2, which gave only ~2.4°
+            # of pitch-down for a 100 ft high-on-glidepath error.
+            # Combined with kd_balance * -vs_fpm damping, commanded
+            # pitch saturated around -2° and the aircraft descended at
+            # roughly the glidepath slope — tracking parallel to the
+            # glidepath but never closing the error. Bumping to 3.5
+            # gives ~-6° pitch response to 100 ft of error, and the
+            # wider [-10, 10] pitch envelope lets short-field visual
+            # approaches sustain a steep descent when arriving high
+            # on glidepath.
+            return (0.004, 10.0, 3.5, 12.0, -10.0, 10.0)
         if phase is FlightPhase.BASE:
-            return (0.008, 8.5, 1.1, 14.0, -6.0, 10.0)
+            # Same reasoning as FINAL but less aggressive, since BASE
+            # is transitioning from level pattern flight to descent.
+            return (0.008, 8.5, 2.5, 14.0, -8.0, 10.0)
         if phase is FlightPhase.DESCENT:
             return (0.009, 8.0, 1.0, 14.0, -6.0, 10.0)
         return (0.01, 8.0, 1.0, 15.0, -4.0, 12.0)
