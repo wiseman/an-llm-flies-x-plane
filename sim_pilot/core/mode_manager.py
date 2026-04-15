@@ -172,8 +172,15 @@ class ModeManager:
                 return FlightPhase.TAXI_CLEAR
             return phase
         if phase is FlightPhase.GO_AROUND:
-            if state.alt_agl_ft >= 400.0:
-                return FlightPhase.ENROUTE_CLIMB
+            # Stay in GO_AROUND indefinitely: climb to pattern altitude
+            # on runway course and then hold there until the LLM decides
+            # what to do next (typically "fly another pattern" via
+            # engage_pattern_fly, or divert). The old transition was
+            # GO_AROUND → ENROUTE_CLIMB at 400 AGL, which then targeted
+            # cruise altitude (3000 MSL) — so a go-around from a bad
+            # final approach would send the aircraft climbing toward
+            # cruise altitude instead of holding pattern altitude.
+            return phase
         return phase
 
     def _downwind_base_turn_ready(self, state: AircraftState, pattern: PatternGeometry) -> bool:

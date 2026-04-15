@@ -182,14 +182,33 @@ class PatternFlyGuidanceTests(unittest.TestCase):
             places=2,
         )
 
-    def test_go_around_commands_takeoff_flaps_and_full_throttle(self) -> None:
-        # Go-around procedure: climb at Vy with full throttle, flaps
-        # retracted to takeoff setting, gear stays down for C172.
-        guidance = self.profile._guidance_for_phase(self._airborne_state(), FlightPhase.GO_AROUND)
+    def test_go_around_below_pattern_altitude_commands_full_climb(self) -> None:
+        # Go-around procedure from well below pattern altitude: climb at
+        # Vy with full throttle, flaps retracted to takeoff setting, gear
+        # stays down for C172.
+        low_state = self._airborne_state(phase_hint_alt_ft=700.0)  # 200 AGL
+        guidance = self.profile._guidance_for_phase(low_state, FlightPhase.GO_AROUND)
         self.assertEqual(guidance.flaps_cmd, 10)
         self.assertEqual(guidance.throttle_limit, (0.9, 1.0))
         self.assertEqual(guidance.target_speed_kt, self.config.performance.vy_kt)
         self.assertEqual(guidance.target_altitude_ft, self.config.pattern_altitude_msl_ft)
+
+    def test_go_around_at_pattern_altitude_levels_off(self) -> None:
+        # Regression: once the go-around climb reaches pattern altitude
+        # the aircraft must level off rather than continue climbing. Old
+        # behavior used a fixed (0.9, 1.0) throttle floor plus GO_AROUND
+        # climb trim (85% / 6°), which kept the aircraft climbing past
+        # the target. The fix lowers the throttle ceiling and hands TECS
+        # a PATTERN_ENTRY tecs_phase_override once within 200 ft of
+        # pattern altitude.
+        at_alt_state = self._airborne_state(
+            phase_hint_alt_ft=self.config.pattern_altitude_msl_ft
+        )
+        guidance = self.profile._guidance_for_phase(at_alt_state, FlightPhase.GO_AROUND)
+        self.assertNotEqual(guidance.throttle_limit, (0.9, 1.0))
+        self.assertLess(guidance.throttle_limit[1], 0.9)
+        self.assertEqual(guidance.target_altitude_ft, self.config.pattern_altitude_msl_ft)
+        self.assertEqual(guidance.tecs_phase_override, FlightPhase.PATTERN_ENTRY)
 
     def test_pattern_fly_route_has_only_pattern_entry_waypoint(self) -> None:
         # Regression for task #10: the obsolete "outbound" waypoint is

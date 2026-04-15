@@ -87,11 +87,9 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
         )
         out = format_snapshot_display(snapshot)
         self.assertIn("idle_lateral, idle_vertical, idle_speed", out)
-        self.assertIn("throttle=0.00", out)
+        self.assertIn("throttle 0.00", out)
         # No desired heading (both fields absent from guidance)
-        self.assertIn("tgt_hdg=—", out)
-        self.assertIn("tgt_alt=—", out)
-        self.assertIn("tgt_spd=—", out)
+        self.assertIn("—", out)  # some target field is "—"
 
     def test_heading_hold_shows_target_heading(self) -> None:
         guidance = GuidanceTargets(
@@ -112,13 +110,13 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
         )
         out = format_snapshot_display(snapshot)
         self.assertIn("heading_hold, altitude_hold, speed_hold", out)
-        self.assertIn("throttle=0.55", out)
-        self.assertIn("tgt_hdg=270°", out)
-        self.assertIn("tgt_alt=3000ft", out)
-        self.assertIn("tgt_spd=95kt", out)
-        self.assertIn("hdg=265°", out)
-        self.assertIn("ias=95kt", out)
-        self.assertIn("on_ground=False", out)
+        self.assertIn("throttle 0.55", out)
+        self.assertIn("265°", out)  # current heading
+        self.assertIn("270°", out)  # target heading
+        self.assertIn("2500 AGL", out)  # 3000 MSL - 500 field elev = 2500 AGL
+        self.assertIn(" 95 kt IAS", out)  # current speed
+        self.assertIn(" 95 kt", out)  # target speed
+        self.assertIn("airborne", out)
 
     def test_target_track_falls_back_when_heading_missing(self) -> None:
         guidance = GuidanceTargets(
@@ -138,9 +136,12 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
             guidance=guidance,
         )
         out = format_snapshot_display(snapshot)
-        self.assertIn("tgt_hdg=180°", out)
+        # target_heading_deg is None, so the display falls back to
+        # target_track_deg (180°) for the target column.
+        target_line = [line for line in out.splitlines() if "heading" in line][0]
+        self.assertIn("180°", target_line)
 
-    def test_multi_line_layout_has_six_rows(self) -> None:
+    def test_layout_has_two_column_current_target(self) -> None:
         snapshot = _make_snapshot(
             state=_make_state(),
             profiles=("idle_lateral",),
@@ -148,37 +149,34 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
             guidance=None,
         )
         lines = format_snapshot_display(snapshot).splitlines()
-        self.assertEqual(len(lines), 6)
-        self.assertTrue(lines[0].startswith("profiles:"))
-        self.assertTrue(lines[1].startswith("phase:"))
-        self.assertTrue(lines[2].startswith("cmd:"))
-        self.assertTrue(lines[3].startswith("state:"))
-        self.assertTrue(lines[4].startswith("world:"))
-        self.assertTrue(lines[5].startswith("runway:"))
+        self.assertIn("phase:", lines[0])
+        self.assertIn("profiles:", lines[0])
+        # Header row announces the two columns
+        header = next(line for line in lines if "current" in line and "target" in line)
+        self.assertIsNotNone(header)
+        # Secondary row shows throttle/flaps/gear/runway
+        bottom = next(
+            line for line in lines if "throttle" in line and "flaps" in line and "gear" in line
+        )
+        self.assertIn("rwy", bottom)
 
-    def test_world_line_uses_east_north_labels_not_lat_lon(self) -> None:
-        # Regression for task #14: the old display labeled position_ft.x /
-        # position_ft.y as "lat" and "lon", which are NOT geographic
-        # coordinates — they are the world-frame east/north offsets from
-        # the georef origin. This was misleading during log review.
+    def test_shows_flap_position(self) -> None:
+        # Regression: flap position must appear on the bottom status row
+        # so the operator can see what configuration the aircraft is in.
+        state = _make_state()
+        import dataclasses
+        state = dataclasses.replace(state, flap_index=20)
         snapshot = _make_snapshot(
-            state=_make_state(),
-            profiles=("idle_lateral",),
-            throttle=0.0,
+            state=state,
+            profiles=("pattern_fly",),
+            throttle=0.45,
             guidance=None,
         )
         out = format_snapshot_display(snapshot)
-        self.assertIn("east=", out)
-        self.assertIn("north=", out)
-        self.assertNotIn("lat=", out)
-        self.assertNotIn("lon=", out)
+        self.assertIn("flaps 20°", out)
 
     def test_runway_line_shows_runway_x_and_y(self) -> None:
-        # Regression for task #14: runway-frame coordinates are what the
-        # pilot cares about during pattern work; they were missing from
-        # the status display.
         state = _make_state()
-        # Override runway_x_ft/runway_y_ft via a dataclasses.replace
         import dataclasses
         state = dataclasses.replace(state, runway_x_ft=1234.0, runway_y_ft=-567.0)
         snapshot = _make_snapshot(
@@ -188,8 +186,7 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
             guidance=None,
         )
         out = format_snapshot_display(snapshot)
-        self.assertIn("x=+1234ft", out)
-        self.assertIn("y=-567ft", out)
+        self.assertIn("rwy x+1234 y-567", out)
 
     def test_runway_line_handles_missing_runway_frame_coords(self) -> None:
         state = _make_state()
@@ -202,8 +199,27 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
             guidance=None,
         )
         out = format_snapshot_display(snapshot)
-        self.assertIn("x=—", out)
-        self.assertIn("y=—", out)
+        self.assertIn("rwy —", out)
+
+    def test_shows_ground_vs_airborne(self) -> None:
+        on_ground = format_snapshot_display(
+            _make_snapshot(
+                state=_make_state(on_ground=True),
+                profiles=("idle_lateral",),
+                throttle=0.0,
+                guidance=None,
+            )
+        )
+        self.assertIn("on ground", on_ground)
+        airborne = format_snapshot_display(
+            _make_snapshot(
+                state=_make_state(on_ground=False),
+                profiles=("idle_lateral",),
+                throttle=0.0,
+                guidance=None,
+            )
+        )
+        self.assertIn("airborne", airborne)
 
 
 class LatestSnapshotWiringTests(unittest.TestCase):

@@ -22,17 +22,18 @@ if TYPE_CHECKING:
     from sim_pilot.live_runner import HeartbeatPump
 
 
-STATUS_PANE_HEIGHT = 7
+STATUS_PANE_HEIGHT = 11
 RADIO_PANE_HEIGHT = 8
 
 
 def format_snapshot_display(snapshot: "StatusSnapshot | None") -> str:
     """Render the multi-line status panel text for the TUI and headless log.
 
-    Shows active profiles, phase, current throttle (commanded), desired
-    heading (from the last guidance), and basic flight state. Used by both
-    the TUI (reads pilot.latest_snapshot directly at ~10 Hz) and the headless
-    control loop (pushes to SimBus every status_interval_s).
+    Two-column "current vs target" layout for the primary flight references
+    (heading, altitude, airspeed, vertical speed) with a single-line bottom
+    row for the secondary state (throttle, flaps, gear, runway position).
+    Used by both the TUI (reads pilot.latest_snapshot directly at ~10 Hz)
+    and the headless control loop (pushes to SimBus every status_interval_s).
     """
     if snapshot is None:
         return "(waiting for first pilot tick)"
@@ -43,35 +44,54 @@ def format_snapshot_display(snapshot: "StatusSnapshot | None") -> str:
     profiles = ", ".join(snapshot.active_profiles) if snapshot.active_profiles else "(none)"
     phase = snapshot.phase.value if snapshot.phase is not None else "—"
 
-    desired_heading: float | None = None
+    # --- target values (from the last guidance) ---
+    target_heading_deg: float | None = None
+    target_alt_msl_ft: float | None = None
+    target_spd_kt: float | None = None
     if guidance is not None:
-        desired_heading = guidance.target_heading_deg
-        if desired_heading is None:
-            desired_heading = guidance.target_track_deg
-    heading_str = f"{desired_heading:.0f}°" if desired_heading is not None else "—"
+        target_heading_deg = guidance.target_heading_deg
+        if target_heading_deg is None:
+            target_heading_deg = guidance.target_track_deg
+        target_alt_msl_ft = guidance.target_altitude_ft
+        target_spd_kt = guidance.target_speed_kt
 
-    target_alt_ft = guidance.target_altitude_ft if guidance is not None else None
-    target_spd_kt = guidance.target_speed_kt if guidance is not None else None
-    target_alt_str = f"{target_alt_ft:.0f}ft" if target_alt_ft is not None else "—"
-    target_spd_str = f"{target_spd_kt:.0f}kt" if target_spd_kt is not None else "—"
+    # alt_msl - alt_agl gives the ground elevation directly beneath the
+    # aircraft, which is the right reference for converting a target MSL
+    # altitude into target AGL. For pattern flying AGL is the more
+    # meaningful number for a reader.
+    field_elev_ft = state.alt_msl_ft - state.alt_agl_ft
+    target_alt_agl_ft: float | None = None
+    if target_alt_msl_ft is not None:
+        target_alt_agl_ft = target_alt_msl_ft - field_elev_ft
 
-    # position_ft is the world-frame offset from the georef origin — x is
-    # east, y is north (see _geodetic_offset_ft in xplane_bridge.py).
-    # Historically labeled "lat/lon" here, which was misleading since they
-    # are NOT geographic coordinates.
-    runway_x_str = (
-        f"{state.runway_x_ft:+.0f}ft" if state.runway_x_ft is not None else "—"
-    )
-    runway_y_str = (
-        f"{state.runway_y_ft:+.0f}ft" if state.runway_y_ft is not None else "—"
-    )
+    current_hdg = f"{state.heading_deg:3.0f}°"
+    target_hdg = f"{target_heading_deg:3.0f}°" if target_heading_deg is not None else "—"
+
+    current_alt = f"{state.alt_agl_ft:5.0f} AGL"
+    target_alt = f"{target_alt_agl_ft:5.0f} AGL" if target_alt_agl_ft is not None else "—"
+
+    current_spd = f"{state.ias_kt:3.0f} kt IAS"
+    target_spd = f"{target_spd_kt:3.0f} kt" if target_spd_kt is not None else "—"
+
+    # Secondary row: throttle (actual), flap degrees, gear, runway x/y.
+    flap_str = f"{state.flap_index}°"
+    gear_str = "dn" if state.gear_down else "up"
+    ground_str = "on ground" if state.on_ground else "airborne"
+    if state.runway_x_ft is not None and state.runway_y_ft is not None:
+        runway_str = f"rwy x{state.runway_x_ft:+.0f} y{state.runway_y_ft:+.0f}"
+    else:
+        runway_str = "rwy —"
+
     lines = [
-        f"profiles:   {profiles}",
-        f"phase:      {phase}",
-        f"cmd:        throttle={commands.throttle:.2f}  tgt_hdg={heading_str}  tgt_alt={target_alt_str}  tgt_spd={target_spd_str}",
-        f"state:      hdg={state.heading_deg:.0f}°  ias={state.ias_kt:.0f}kt  gs={state.gs_kt:.0f}kt  alt_agl={state.alt_agl_ft:.0f}ft  vs={state.vs_fpm:+.0f}fpm",
-        f"world:      east={state.position_ft.x:+.0f}ft  north={state.position_ft.y:+.0f}ft  on_ground={state.on_ground}",
-        f"runway:     x={runway_x_str}  y={runway_y_str}",
+        f"phase:       {phase:<18} profiles:   {profiles}",
+        "",
+        f"                 current           target",
+        f"  heading        {current_hdg:<18}{target_hdg}",
+        f"  altitude       {current_alt:<18}{target_alt}",
+        f"  airspeed       {current_spd:<18}{target_spd}",
+        f"  vertical       {state.vs_fpm:+5.0f} fpm",
+        "",
+        f"  throttle {commands.throttle:4.2f}   flaps {flap_str:<5}   gear {gear_str}   {ground_str}   {runway_str}",
     ]
     return "\n".join(lines)
 

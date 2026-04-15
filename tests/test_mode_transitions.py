@@ -442,6 +442,66 @@ class StayInPatternClimbTests(unittest.TestCase):
         self.assertEqual(phase, FlightPhase.DOWNWIND)
 
 
+class GoAroundHoldsPatternAltitudeTests(unittest.TestCase):
+    """Regression: after a go-around the state machine should hold the
+    aircraft in GO_AROUND phase — it must NOT transition to ENROUTE_CLIMB
+    (which would target cruise altitude 3000 MSL instead of pattern
+    altitude). Observed in sim_pilot-20260415-130505.log: go-around from
+    a bad final approach immediately flipped to ENROUTE_CLIMB and the
+    aircraft started climbing toward cruise altitude instead of holding
+    pattern altitude for the next pattern entry."""
+
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.mode_manager = ModeManager(self.config)
+        self.runway_frame = RunwayFrame(self.config.airport.runway)
+        self.pattern = build_pattern_geometry(
+            self.runway_frame,
+            downwind_offset_ft=self.config.pattern.downwind_offset_ft,
+            extension_ft=0.0,
+        )
+        self.route_manager = RouteManager([])
+        self.safe = SafetyStatus(False, None, self.config.limits.max_bank_pattern_deg)
+
+    def test_go_around_persists_below_pattern_altitude(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.GO_AROUND,
+            make_state(alt_agl_ft=300.0, vs_fpm=700.0, on_ground=False),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.GO_AROUND)
+
+    def test_go_around_persists_even_above_400_agl(self) -> None:
+        # Regression: used to transition to ENROUTE_CLIMB at 400 AGL,
+        # which then targeted cruise altitude (3000 MSL) instead of
+        # pattern altitude.
+        phase = self.mode_manager.update(
+            FlightPhase.GO_AROUND,
+            make_state(alt_agl_ft=600.0, vs_fpm=500.0, on_ground=False),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.GO_AROUND)
+
+    def test_go_around_persists_at_pattern_altitude(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.GO_AROUND,
+            make_state(
+                alt_agl_ft=self.config.pattern.altitude_agl_ft,
+                alt_msl_ft=self.config.pattern_altitude_msl_ft,
+                vs_fpm=0.0,
+                on_ground=False,
+            ),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.GO_AROUND)
+
+
 class BaseToFinalAlongTrackTests(unittest.TestCase):
     """Regression tests for BASE → FINAL gating. The base leg is a
     diagonal, so the aircraft's track during base is ~130° off runway

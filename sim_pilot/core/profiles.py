@@ -480,24 +480,43 @@ class PatternFlyProfile:
                 bank_limit_deg=bank_limit_deg,
             )
         if phase is FlightPhase.GO_AROUND:
-            # Climb runway heading at Vy, retract flaps to takeoff setting,
-            # and level off at pattern altitude so the next pattern entry
-            # doesn't have to re-descend. Explicitly does NOT consult
-            # route_manager.active_waypoint(), because direct_to() from a
-            # position abeam the runway to a distant waypoint produced
-            # nonsense go-around headings in the field.
+            # Climb runway heading at Vy and level off at pattern
+            # altitude. Stays in GO_AROUND indefinitely — the LLM is
+            # responsible for deciding what to do next (fly another
+            # pattern, divert, etc.). Explicitly does NOT consult
+            # route_manager.active_waypoint(), because direct_to() from
+            # a position abeam the runway to a distant waypoint
+            # produced nonsense go-around headings in the field.
             runway_course_deg = self.runway_frame.runway.course_deg
             track_error_deg = wrap_degrees_180(runway_course_deg - state.track_deg)
             bank_cmd_deg = clamp(track_error_deg * 0.35, -bank_limit_deg, bank_limit_deg)
+            # Climb toward pattern altitude, then level off. The
+            # threshold for switching from climb (0.9-1.0 throttle,
+            # GO_AROUND trim) to level (0.2-0.55 throttle, PATTERN_ENTRY
+            # trim) is 100 ft below target — anticipating the overshoot
+            # that comes from TECS integrator wind-up accumulated during
+            # the climb. The 0.55 throttle ceiling is just above
+            # PATTERN_ENTRY trim (0.45), so any integrator-driven
+            # throttle push is capped and the aircraft bleeds speed
+            # into altitude rather than continuing to climb.
+            pattern_alt_msl_ft = self.config.pattern_altitude_msl_ft
+            alt_error_ft = pattern_alt_msl_ft - state.alt_msl_ft
+            if alt_error_ft > 100.0:
+                throttle_limit = (0.9, 1.0)
+                tecs_phase_override = None  # uses GO_AROUND climb trim
+            else:
+                throttle_limit = (0.2, 0.55)
+                tecs_phase_override = FlightPhase.PATTERN_ENTRY
             return GuidanceTargets(
                 lateral_mode=LateralMode.TRACK_HOLD,
                 vertical_mode=VerticalMode.TECS,
                 target_bank_deg=bank_cmd_deg,
                 target_track_deg=runway_course_deg,
                 target_heading_deg=runway_course_deg,
-                target_altitude_ft=self.config.pattern_altitude_msl_ft,
+                target_altitude_ft=pattern_alt_msl_ft,
                 target_speed_kt=self.config.performance.vy_kt,
-                throttle_limit=(0.9, 1.0),
+                throttle_limit=throttle_limit,
+                tecs_phase_override=tecs_phase_override,
                 flaps_cmd=10,
                 gear_down=True,
             )
