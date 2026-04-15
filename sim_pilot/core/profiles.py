@@ -459,7 +459,40 @@ class PatternFlyProfile:
                     self.last_go_around_reason = "unknown"
         guidance = self._guidance_for_phase(state, self.phase)
         guidance = self.safety_monitor.apply_limits(guidance, self.phase)
+        # Once the go-around climb has settled near pattern altitude,
+        # hand off to three single-axis holds (heading / altitude /
+        # speed). The LLM then sees a normal "autopilot hold" state
+        # and can decide what to do next (fly another pattern, divert,
+        # continue climb). Without this, pattern_fly would stay
+        # engaged in GO_AROUND indefinitely, which isn't a state the
+        # LLM's prompt vocabulary is set up to handle naturally.
+        if self.phase is FlightPhase.GO_AROUND and self._go_around_climb_settled(state):
+            self._hand_off_to_holds(pilot)
         return _guidance_to_contribution(guidance)
+
+    def _go_around_climb_settled(self, state: AircraftState) -> bool:
+        alt_error_ft = abs(self.config.pattern_altitude_msl_ft - state.alt_msl_ft)
+        return alt_error_ft < 100.0 and abs(state.vs_fpm) < 200.0
+
+    def _hand_off_to_holds(self, pilot: "PilotCore") -> None:
+        """Replace this profile with HeadingHold + AltitudeHold + SpeedHold.
+
+        Engages all three holds via ``pilot.engage_profile``. The first
+        engagement displaces ``pattern_fly`` (because HeadingHold owns
+        the LATERAL axis and pattern_fly owns all three); the
+        subsequent two fill the orphaned VERTICAL and SPEED axes. After
+        the three calls, ``pilot.active_profiles`` contains exactly the
+        three holds.
+        """
+        pilot.engage_profile(
+            HeadingHoldProfile(heading_deg=self.runway_frame.runway.course_deg)
+        )
+        pilot.engage_profile(
+            AltitudeHoldProfile(altitude_ft=self.config.pattern_altitude_msl_ft)
+        )
+        pilot.engage_profile(
+            SpeedHoldProfile(speed_kt=self.config.performance.vy_kt)
+        )
 
     def _build_pattern_geometry(self) -> PatternGeometry:
         return build_pattern_geometry(

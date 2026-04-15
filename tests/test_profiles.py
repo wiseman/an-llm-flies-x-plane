@@ -216,6 +216,70 @@ class PatternFlyGuidanceTests(unittest.TestCase):
         names = [wp.name for wp in self.profile.route_manager.waypoints]
         self.assertEqual(names, ["pattern_entry_start"])
 
+    def test_go_around_hands_off_to_holds_when_settled(self) -> None:
+        # After the go-around climb reaches pattern altitude and vs
+        # has bled off, pattern_fly should displace itself with three
+        # single-axis holds (heading_hold, altitude_hold, speed_hold)
+        # so the LLM gets a clean "autopilot hold" handoff point.
+        self.profile.phase = FlightPhase.GO_AROUND
+        state = self._airborne_state(
+            phase_hint_alt_ft=self.config.pattern_altitude_msl_ft
+        )
+        import dataclasses
+        state = dataclasses.replace(state, vs_fpm=50.0)  # near-level
+        self.profile.contribute(state, 0.2, self.pilot)
+        names = set(self.pilot.list_profile_names())
+        self.assertNotIn("pattern_fly", names)
+        self.assertEqual(names, {"heading_hold", "altitude_hold", "speed_hold"})
+
+    def test_go_around_holds_inherit_runway_course_and_pattern_altitude(self) -> None:
+        self.profile.phase = FlightPhase.GO_AROUND
+        state = self._airborne_state(
+            phase_hint_alt_ft=self.config.pattern_altitude_msl_ft
+        )
+        import dataclasses
+        state = dataclasses.replace(state, vs_fpm=50.0)
+        self.profile.contribute(state, 0.2, self.pilot)
+        heading_hold = self.pilot.find_profile("heading_hold")
+        altitude_hold = self.pilot.find_profile("altitude_hold")
+        speed_hold = self.pilot.find_profile("speed_hold")
+        assert isinstance(heading_hold, HeadingHoldProfile)
+        assert isinstance(altitude_hold, AltitudeHoldProfile)
+        assert isinstance(speed_hold, SpeedHoldProfile)
+        self.assertAlmostEqual(
+            heading_hold.heading_deg, self.config.airport.runway.course_deg, places=2
+        )
+        self.assertAlmostEqual(
+            altitude_hold.altitude_ft, self.config.pattern_altitude_msl_ft, places=2
+        )
+        self.assertAlmostEqual(
+            speed_hold.speed_kt, self.config.performance.vy_kt, places=2
+        )
+
+    def test_go_around_still_climbing_does_not_hand_off(self) -> None:
+        # If the aircraft is still well below pattern altitude, the
+        # handoff must wait — otherwise we lose the climb trim and
+        # throttle floor that pattern_fly's GO_AROUND guidance provides.
+        self.profile.phase = FlightPhase.GO_AROUND
+        low_state = self._airborne_state(
+            phase_hint_alt_ft=self.config.pattern_altitude_msl_ft - 500.0
+        )
+        self.profile.contribute(low_state, 0.2, self.pilot)
+        self.assertIn("pattern_fly", self.pilot.list_profile_names())
+
+    def test_go_around_at_altitude_but_still_climbing_does_not_hand_off(self) -> None:
+        # Even at the target altitude, if vs_fpm is large (e.g. the
+        # aircraft is about to overshoot), we wait for the climb to
+        # settle before handing off.
+        self.profile.phase = FlightPhase.GO_AROUND
+        state = self._airborne_state(
+            phase_hint_alt_ft=self.config.pattern_altitude_msl_ft
+        )
+        import dataclasses
+        state = dataclasses.replace(state, vs_fpm=500.0)  # still climbing hard
+        self.profile.contribute(state, 0.2, self.pilot)
+        self.assertIn("pattern_fly", self.pilot.list_profile_names())
+
     def _pattern_state(
         self,
         *,
