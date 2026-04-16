@@ -481,6 +481,21 @@ def tool_go_around(ctx: ToolContext) -> str:
     return "go_around triggered"
 
 
+def tool_execute_touch_and_go(ctx: ToolContext) -> str:
+    """Declare that the upcoming landing is a touch-and-go. Must be
+    called during BASE or FINAL (or at the latest on the ROUNDOUT
+    heartbeat) before the wheels touch. Once the aircraft touches
+    down, the phase machine skips ROLLOUT (which applies brakes) and
+    transitions directly to TAKEOFF_ROLL, so the aircraft accelerates
+    straight back into another pattern instead of braking to a stop.
+    """
+    profile = _find_pattern_profile(ctx)
+    if profile is None:
+        return "error: pattern_fly profile is not active"
+    profile.execute_touch_and_go()
+    return "touch-and-go armed; landing will transition to takeoff_roll instead of rollout"
+
+
 def tool_cleared_to_land(ctx: ToolContext, runway_id: str) -> str:
     profile = _find_pattern_profile(ctx)
     if profile is None:
@@ -616,6 +631,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "extend_downwind": tool_extend_downwind,
     "turn_base_now": tool_turn_base_now,
     "go_around": tool_go_around,
+    "execute_touch_and_go": tool_execute_touch_and_go,
     "cleared_to_land": tool_cleared_to_land,
     "join_pattern": tool_join_pattern,
     "tune_radio": tool_tune_radio,
@@ -875,6 +891,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     _fn_schema(
         "go_around",
         "Command an immediate go-around. Requires pattern_fly to be active.",
+        {},
+        [],
+    ),
+    _fn_schema(
+        "execute_touch_and_go",
+        "Declare that the upcoming landing is a touch-and-go. Must be called "
+        "during BASE or FINAL (before the wheels touch). On touchdown the phase "
+        "machine will skip ROLLOUT (braking) and transition directly to "
+        "TAKEOFF_ROLL: full throttle, flaps retract to 10°, no brakes. The "
+        "aircraft re-accelerates, rotates, and flies another pattern. The flag "
+        "auto-clears on TAKEOFF_ROLL → ROTATE so the next approach defaults to "
+        "a normal full-stop landing unless you call execute_touch_and_go again. "
+        "Requires pattern_fly to be active.",
         {},
         [],
     ),

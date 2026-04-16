@@ -227,7 +227,14 @@ class SpeedHoldProfile:
 
 
 def build_takeoff_roll_guidance(config: ConfigBundle, runway_frame: RunwayFrame) -> GuidanceTargets:
-    """Full-power takeoff roll: centerline hold, wings level, pitch neutral, target Vr."""
+    """Full-power takeoff roll: centerline hold, wings level, pitch neutral, target Vr.
+
+    Commands ``flaps_cmd=10`` (short-field takeoff setting) so that a
+    touch-and-go transitioning directly from landing flaps (30) into
+    TAKEOFF_ROLL retracts the flaps as the aircraft accelerates. This
+    is within the C172 POH for takeoff and is harmless for normal
+    takeoffs that were already at 0° or 10°.
+    """
     return GuidanceTargets(
         lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
         vertical_mode=VerticalMode.PITCH_HOLD,
@@ -236,6 +243,7 @@ def build_takeoff_roll_guidance(config: ConfigBundle, runway_frame: RunwayFrame)
         target_pitch_deg=0.0,
         target_speed_kt=config.performance.vr_kt,
         throttle_limit=(1.0, 1.0),
+        flaps_cmd=10,
     )
 
 
@@ -388,6 +396,13 @@ class PatternFlyProfile:
         self.pattern_extension_ft = 0.0
         self._turn_base_trigger = False
         self._force_go_around_trigger = False
+        # Touch-and-go intent: declared via execute_touch_and_go()
+        # during the approach. When set, the ground-contact transition
+        # in FLARE/ROUNDOUT/FINAL routes to TAKEOFF_ROLL instead of
+        # ROLLOUT (no brakes, full throttle, flaps retract). Cleared
+        # automatically on the TAKEOFF_ROLL → ROTATE transition so
+        # the next approach defaults to a full-stop landing.
+        self._touch_and_go_trigger = False
         self.cleared_to_land_runway: str | None = None
         self.phase: FlightPhase = FlightPhase.PREFLIGHT
         # Set on the tick a go-around is triggered, so observers (heartbeat
@@ -420,6 +435,19 @@ class PatternFlyProfile:
 
     def go_around(self) -> None:
         self._force_go_around_trigger = True
+
+    def execute_touch_and_go(self) -> None:
+        """Declare that the upcoming landing is a touch-and-go.
+
+        Call this during BASE or FINAL. On touchdown the state
+        machine skips ROLLOUT (braking) and transitions directly to
+        TAKEOFF_ROLL (full throttle, flaps retracted, no brakes).
+        The aircraft re-accelerates, rotates, and flies another
+        pattern. The flag auto-clears on TAKEOFF_ROLL → ROTATE so
+        the next approach is a normal full-stop landing unless
+        execute_touch_and_go() is called again.
+        """
+        self._touch_and_go_trigger = True
 
     def extend_downwind(self, extension_ft: float) -> None:
         self.pattern_extension_ft += max(0.0, float(extension_ft))
@@ -464,9 +492,15 @@ class PatternFlyProfile:
             turn_base_now=self._turn_base_trigger,
             force_go_around=self._force_go_around_trigger,
             stay_in_pattern=True,
+            touch_and_go=self._touch_and_go_trigger,
         )
         if previous_phase is FlightPhase.DOWNWIND and self.phase is not FlightPhase.DOWNWIND:
             self._turn_base_trigger = False
+        # Clear the touch-and-go flag once the aircraft is rolling
+        # down the runway for the second takeoff. From then on the
+        # next approach defaults to a normal full-stop landing.
+        if previous_phase is FlightPhase.TAKEOFF_ROLL and self.phase is FlightPhase.ROTATE:
+            self._touch_and_go_trigger = False
         if self.phase is FlightPhase.GO_AROUND:
             self._force_go_around_trigger = False
             # Record why this tick flipped to GO_AROUND — but only on the

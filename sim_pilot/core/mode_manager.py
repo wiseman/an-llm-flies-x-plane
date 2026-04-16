@@ -24,6 +24,7 @@ class ModeManager:
         turn_base_now: bool = False,
         force_go_around: bool = False,
         stay_in_pattern: bool = False,
+        touch_and_go: bool = False,
     ) -> FlightPhase:
         if force_go_around or safety_status.request_go_around:
             return FlightPhase.GO_AROUND
@@ -157,8 +158,14 @@ class ModeManager:
             # commanding approach speed, the stall-margin dropped, and
             # the safety monitor fired a go-around from a touched-down
             # aircraft.
+            #
+            # Touch-and-go: if the LLM has declared intent via
+            # execute_touch_and_go() during the approach, jump straight
+            # to TAKEOFF_ROLL instead of ROLLOUT — no brakes, full
+            # throttle, flaps retract to takeoff setting, plane
+            # re-accelerates and takes off again.
             if state.on_ground:
-                return FlightPhase.ROLLOUT
+                return FlightPhase.TAKEOFF_ROLL if touch_and_go else FlightPhase.ROLLOUT
         if phase is FlightPhase.FINAL:
             if state.alt_agl_ft <= self.config.flare.roundout_height_ft:
                 return FlightPhase.ROUNDOUT

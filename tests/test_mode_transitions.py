@@ -442,6 +442,71 @@ class StayInPatternClimbTests(unittest.TestCase):
         self.assertEqual(phase, FlightPhase.DOWNWIND)
 
 
+class TouchAndGoTests(unittest.TestCase):
+    """Regression: when execute_touch_and_go has been called during the
+    approach, the FLARE/ROUNDOUT/FINAL → on_ground transition should go
+    straight to TAKEOFF_ROLL instead of ROLLOUT so the aircraft skips
+    braking and re-accelerates for another pattern."""
+
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.mode_manager = ModeManager(self.config)
+        self.runway_frame = RunwayFrame(self.config.airport.runway)
+        self.pattern = build_pattern_geometry(
+            self.runway_frame,
+            downwind_offset_ft=self.config.pattern.downwind_offset_ft,
+            extension_ft=0.0,
+        )
+        self.route_manager = RouteManager([])
+        self.safe = SafetyStatus(False, None, self.config.limits.max_bank_pattern_deg)
+
+    def test_flare_on_ground_without_touch_and_go_goes_to_rollout(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.FLARE,
+            make_state(alt_agl_ft=5.0, on_ground=True, ias_kt=55.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+        )
+        self.assertEqual(phase, FlightPhase.ROLLOUT)
+
+    def test_flare_on_ground_with_touch_and_go_goes_to_takeoff_roll(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.FLARE,
+            make_state(alt_agl_ft=5.0, on_ground=True, ias_kt=55.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+            touch_and_go=True,
+        )
+        self.assertEqual(phase, FlightPhase.TAKEOFF_ROLL)
+
+    def test_final_on_ground_with_touch_and_go_goes_to_takeoff_roll(self) -> None:
+        # Stale AGL case: plane reports alt_agl > 0 but on_ground is
+        # true. Touch-and-go flag should still short-circuit to
+        # TAKEOFF_ROLL even from FINAL.
+        phase = self.mode_manager.update(
+            FlightPhase.FINAL,
+            make_state(alt_agl_ft=35.0, on_ground=True, ias_kt=60.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+            touch_and_go=True,
+        )
+        self.assertEqual(phase, FlightPhase.TAKEOFF_ROLL)
+
+    def test_roundout_on_ground_with_touch_and_go_goes_to_takeoff_roll(self) -> None:
+        phase = self.mode_manager.update(
+            FlightPhase.ROUNDOUT,
+            make_state(alt_agl_ft=15.0, on_ground=True, ias_kt=58.0),
+            self.route_manager,
+            self.pattern,
+            self.safe,
+            touch_and_go=True,
+        )
+        self.assertEqual(phase, FlightPhase.TAKEOFF_ROLL)
+
+
 class GroundContactShortCircuitsApproachTests(unittest.TestCase):
     """Regression: if the aircraft reports on_ground during FINAL,
     ROUNDOUT, or FLARE, the mode machine must transition straight to

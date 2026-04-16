@@ -130,6 +130,22 @@ class ProfileToolsTests(unittest.TestCase):
         self.assertEqual(names, {"heading_hold", "altitude_hold", "speed_hold"})
         self.assertNotIn("takeoff", names)
 
+    def test_execute_touch_and_go_arms_pattern_fly_flag(self) -> None:
+        ctx = make_ctx()
+        ctx.pilot.engage_profile(PatternFlyProfile(ctx.config, ctx.pilot.runway_frame))
+        profile = ctx.pilot.find_profile("pattern_fly")
+        assert isinstance(profile, PatternFlyProfile)
+        self.assertFalse(profile._touch_and_go_trigger)
+        result = dispatch_tool(make_call("execute_touch_and_go"), ctx)
+        self.assertIn("touch-and-go armed", result)
+        self.assertTrue(profile._touch_and_go_trigger)
+
+    def test_execute_touch_and_go_without_pattern_fly_errors(self) -> None:
+        ctx = make_ctx()
+        result = dispatch_tool(make_call("execute_touch_and_go"), ctx)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("pattern_fly", result)
+
     def test_engage_cruise_carries_target_values(self) -> None:
         from sim_pilot.core.profiles import AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile
         ctx = make_ctx()

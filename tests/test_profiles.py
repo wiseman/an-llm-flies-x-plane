@@ -132,6 +132,77 @@ class PatternFlyMethodTests(unittest.TestCase):
         self.profile.cleared_to_land("16L")
         self.assertEqual(self.profile.cleared_to_land_runway, "16L")
 
+    def test_execute_touch_and_go_sets_trigger(self) -> None:
+        self.assertFalse(self.profile._touch_and_go_trigger)
+        self.profile.execute_touch_and_go()
+        self.assertTrue(self.profile._touch_and_go_trigger)
+
+    def _flare_state(self):
+        from sim_pilot.core.types import AircraftState, Vec2
+        return AircraftState(
+            t_sim=0.0,
+            dt=0.2,
+            position_ft=Vec2(0.0, 0.0),
+            alt_msl_ft=self.config.airport.field_elevation_ft + 3.0,
+            alt_agl_ft=3.0,
+            pitch_deg=4.0,
+            roll_deg=0.0,
+            heading_deg=self.config.airport.runway.course_deg,
+            track_deg=self.config.airport.runway.course_deg,
+            p_rad_s=0.0,
+            q_rad_s=0.0,
+            r_rad_s=0.0,
+            ias_kt=60.0,
+            tas_kt=60.0,
+            gs_kt=60.0,
+            vs_fpm=-100.0,
+            ground_velocity_ft_s=Vec2(60.0, 0.0),
+            flap_index=30,
+            gear_down=True,
+            on_ground=True,
+            throttle_pos=0.1,
+            runway_id=self.config.airport.runway.id,
+            runway_dist_remaining_ft=None,
+            runway_x_ft=500.0,
+            runway_y_ft=0.0,
+            centerline_error_ft=0.0,
+            threshold_abeam=False,
+            distance_to_touchdown_ft=None,
+            stall_margin=1.2,
+        )
+
+    def test_touch_and_go_flare_touchdown_transitions_to_takeoff_roll(self) -> None:
+        self.profile.phase = FlightPhase.FLARE
+        self.profile.execute_touch_and_go()
+        state = self._flare_state()  # on_ground, ias 60 kt (above vr 55)
+        self.profile.contribute(state, 0.2, self.pilot)
+        # Ground contact during FLARE with the flag set should route
+        # through TAKEOFF_ROLL — and because ias is already above Vr,
+        # the mode manager's airborne bailout will bump it to ROTATE
+        # in the same tick.
+        self.assertIn(self.profile.phase, {FlightPhase.TAKEOFF_ROLL, FlightPhase.ROTATE})
+        self.assertNotEqual(self.profile.phase, FlightPhase.ROLLOUT)
+
+    def test_touch_and_go_flag_clears_on_takeoff_to_rotate(self) -> None:
+        # After the aircraft reaches rotate speed on the re-takeoff
+        # roll, the touch-and-go flag must clear so the NEXT approach
+        # defaults to a normal full-stop landing. Otherwise a single
+        # execute_touch_and_go() call would latch permanently.
+        self.profile.phase = FlightPhase.TAKEOFF_ROLL
+        self.profile._touch_and_go_trigger = True
+        state = self._flare_state()  # ias 60 > vr 55, on centerline
+        self.profile.contribute(state, 0.2, self.pilot)
+        self.assertEqual(self.profile.phase, FlightPhase.ROTATE)
+        self.assertFalse(self.profile._touch_and_go_trigger)
+
+    def test_touch_and_go_not_set_lands_normally_on_ground_contact(self) -> None:
+        # Without the flag, ground contact during FLARE should still
+        # go to ROLLOUT (braking), unchanged behavior.
+        self.profile.phase = FlightPhase.FLARE
+        state = self._flare_state()
+        self.profile.contribute(state, 0.2, self.pilot)
+        self.assertEqual(self.profile.phase, FlightPhase.ROLLOUT)
+
     def _downwind_state(self, *, runway_x_ft: float):
         # Aircraft on downwind, wings level, heading 180° (downwind on
         # runway 36 left traffic for the default KTEST config).
@@ -864,6 +935,14 @@ class TakeoffHelperTests(unittest.TestCase):
         self.assertEqual(gt.lateral_mode, LateralMode.ROLLOUT_CENTERLINE)
         self.assertEqual(gt.target_pitch_deg, 0.0)
         self.assertEqual(gt.target_speed_kt, self.config.performance.vr_kt)
+
+    def test_takeoff_roll_guidance_commands_takeoff_flaps(self) -> None:
+        # Regression: touch-and-go transitions TAKEOFF_ROLL directly
+        # from a landing config (flaps 30). TAKEOFF_ROLL guidance must
+        # command flaps 10 (short-field takeoff setting) so the plane
+        # retracts flaps as it accelerates for the next takeoff.
+        gt = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        self.assertEqual(gt.flaps_cmd, 10)
 
     def test_rotate_guidance_on_ground_uses_rollout_centerline(self) -> None:
         # While the wheels are still on the runway, rotation guidance
