@@ -54,4 +54,24 @@ uv run python -m sim_pilot --backend xplane --interactive-atc \
 uv run python -m unittest discover -s tests -v
 ```
 
-The live backend requires X-Plane 12.1.1+ with the web API enabled on port 8086 (Settings > Data Output > Web Server). The `--runway-csv-path` flag points to an [ourairports](https://ourairports.com/data/) `runways.csv` file (defaults to `~/data/runways.csv`).
+## Configuration
+
+The live backend requires:
+
+- **X-Plane 12.1.1+** with the web API enabled on port 8086 (Settings > Data Output > Web Server)
+- **An OpenAI API key** for the LLM worker that interprets ATC/operator messages
+- **A runways CSV** from [ourairports](https://ourairports.com/data/) (defaults to `~/data/runways.csv`; override with `--runway-csv-path`)
+
+Create a `.env` file in the project root (it is gitignored):
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+Or export the variable directly:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+The offline deterministic simulator (`--backend simple`, the default) does not require an API key or X-Plane.
