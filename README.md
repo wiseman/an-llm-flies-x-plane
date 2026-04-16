@@ -2,7 +2,9 @@
 
 An LLM-driven autopilot for X-Plane 12 that flies a deterministic traffic pattern while an LLM handles ATC communication, mission decisions, and high-level pilot intent.
 
-[![Demo video](https://img.youtube.com/vi/5Z6APyCtDTM/maxresdefault.jpg)](https://www.youtube.com/watch?v=5Z6APyCtDTM)
+<a href="https://www.youtube.com/watch?v=5Z6APyCtDTM">
+  <img src="https://img.youtube.com/vi/5Z6APyCtDTM/maxresdefault.jpg" width="600" alt="Demo video">
+</a>
 
 ## Design
 
