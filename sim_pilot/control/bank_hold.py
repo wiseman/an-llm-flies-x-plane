@@ -26,6 +26,9 @@ class BankController:
         error = target_bank_deg - roll_deg
         return self._pid.update(error=error, rate_feedback=roll_rate_deg_s, dt=dt)
 
+    def reset(self) -> None:
+        self._pid.reset()
+
 
 @dataclass(slots=True)
 class CoordinationController:

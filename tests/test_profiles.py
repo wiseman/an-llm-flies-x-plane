@@ -671,6 +671,98 @@ class HeadingHoldDirectionTests(unittest.TestCase):
             HeadingHoldProfile(heading_deg=270.0, turn_direction="backwards")
 
 
+class GroundAileronTests(unittest.TestCase):
+    """Regression: while on the ground the autopilot must not drive
+    ailerons. The rollout controller steers with rudder + nosewheel;
+    any PID-driven aileron activity shows up in X-Plane as the yoke
+    visibly moving around and trying to "steer" sideways, which is
+    not how three-wheel aircraft are controlled."""
+
+    def setUp(self) -> None:
+        self.config = load_default_config_bundle()
+        self.pilot = PilotCore(self.config)
+
+    def _ground_state(self, *, roll_deg: float = 0.0):
+        from sim_pilot.core.types import AircraftState, Vec2
+        return AircraftState(
+            t_sim=0.0,
+            dt=0.2,
+            position_ft=Vec2(0.0, 0.0),
+            alt_msl_ft=self.config.airport.field_elevation_ft,
+            alt_agl_ft=0.0,
+            pitch_deg=0.0,
+            roll_deg=roll_deg,
+            heading_deg=self.config.airport.runway.course_deg,
+            track_deg=self.config.airport.runway.course_deg,
+            p_rad_s=0.0,
+            q_rad_s=0.0,
+            r_rad_s=0.0,
+            ias_kt=30.0,
+            tas_kt=30.0,
+            gs_kt=30.0,
+            vs_fpm=0.0,
+            ground_velocity_ft_s=Vec2(0.0, 30.0),
+            flap_index=0,
+            gear_down=True,
+            on_ground=True,
+            throttle_pos=0.0,
+            runway_id=self.config.airport.runway.id,
+            runway_dist_remaining_ft=None,
+            runway_x_ft=200.0,
+            runway_y_ft=0.0,
+            centerline_error_ft=0.0,
+            threshold_abeam=False,
+            distance_to_touchdown_ft=None,
+            stall_margin=2.0,
+        )
+
+    def test_ground_rollout_commands_zero_aileron(self) -> None:
+        from sim_pilot.core.profiles import build_takeoff_roll_guidance
+        guidance = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        state = self._ground_state(roll_deg=0.0)
+        commands = self.pilot._commands_from_guidance(state, guidance)
+        self.assertEqual(commands.aileron, 0.0)
+
+    def test_ground_rollout_commands_zero_aileron_even_with_roll_error(self) -> None:
+        # Even if the aircraft has residual roll attitude (a bump on
+        # the runway, crosswind pushing a wing), the autopilot must
+        # NOT try to level the wings with aileron. Real pilots hold
+        # aileron manually into the wind; the autopilot stays out of
+        # it entirely on the ground.
+        from sim_pilot.core.profiles import build_takeoff_roll_guidance
+        guidance = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        state = self._ground_state(roll_deg=5.0)
+        commands = self.pilot._commands_from_guidance(state, guidance)
+        self.assertEqual(commands.aileron, 0.0)
+
+    def test_ground_contact_resets_bank_integrator(self) -> None:
+        # Any residual PID integrator wind-up from the preceding air
+        # phases must be cleared when we touch down in rollout, so
+        # the next takeoff starts from a clean state.
+        from sim_pilot.core.profiles import build_takeoff_roll_guidance
+        # Seed a non-zero integrator to stand in for accumulated
+        # wind-up from the preceding flight phase.
+        self.pilot.bank_controller._pid.integrator = 8.0
+        guidance = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        state = self._ground_state()
+        self.pilot._commands_from_guidance(state, guidance)
+        self.assertEqual(self.pilot.bank_controller._pid.integrator, 0.0)
+
+    def test_airborne_rollout_still_uses_bank_controller(self) -> None:
+        # If for some reason ROLLOUT_CENTERLINE is active while airborne
+        # (e.g., a bounced touchdown), the PID-driven aileron path
+        # must still run so the aircraft can hold wings level in the air.
+        from sim_pilot.core.profiles import build_takeoff_roll_guidance
+        guidance = build_takeoff_roll_guidance(self.config, self.pilot.runway_frame)
+        state = self._ground_state(roll_deg=8.0)
+        import dataclasses
+        state = dataclasses.replace(state, on_ground=False, alt_agl_ft=10.0)
+        commands = self.pilot._commands_from_guidance(state, guidance)
+        # PID with positive roll error → negative aileron command to
+        # roll back toward wings level.
+        self.assertLess(commands.aileron, 0.0)
+
+
 class TakeoffHelperTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_default_config_bundle()

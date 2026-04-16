@@ -248,7 +248,20 @@ class PilotCore:
                 gs_kt=state.gs_kt,
                 dt=state.dt,
             )
-            aileron = self.bank_controller.update(0.0, state.roll_deg, state.p_rad_s, state.dt)
+            if state.on_ground:
+                # On the ground, steering is done by rudder + nosewheel
+                # via the rollout controller. The yoke stays centered
+                # — a real pilot doesn't use ailerons to correct roll
+                # attitude while rolling, and any PID-driven aileron
+                # activity here shows up in X-Plane as the yoke visibly
+                # moving around trying to "steer". Reset the bank
+                # controller's integrator too so it doesn't carry stale
+                # wind-up from the preceding flight phases into the
+                # next takeoff.
+                self.bank_controller.reset()
+                aileron = 0.0
+            else:
+                aileron = self.bank_controller.update(0.0, state.roll_deg, state.p_rad_s, state.dt)
         else:
             target_bank_deg = guidance.target_bank_deg or 0.0
             aileron = self.bank_controller.update(target_bank_deg, state.roll_deg, state.p_rad_s, state.dt)
