@@ -144,6 +144,36 @@ def tool_engage_speed_hold(ctx: ToolContext, speed_kt: float) -> str:
     return f"engaged speed_hold speed={profile.speed_kt:.0f}kt{_format_displaced(displaced)}"
 
 
+def tool_engage_cruise(
+    ctx: ToolContext,
+    heading_deg: float,
+    altitude_ft: float,
+    speed_kt: float,
+) -> str:
+    """Atomically install heading_hold + altitude_hold + speed_hold.
+
+    Convenience for the cross-country cruise leg: rather than calling
+    the three single-axis tools in sequence (which briefly leaves the
+    vertical and speed axes uncovered when you're transitioning out of
+    a three-axis profile like pattern_fly or takeoff), this engages all
+    three holds under one lock acquisition so the control loop never
+    sees an intermediate state with orphaned axes.
+    """
+    profiles = [
+        HeadingHoldProfile(
+            heading_deg=heading_deg,
+            max_bank_deg=ctx.config.limits.max_bank_enroute_deg,
+        ),
+        AltitudeHoldProfile(altitude_ft=altitude_ft),
+        SpeedHoldProfile(speed_kt=speed_kt),
+    ]
+    displaced = ctx.pilot.engage_profiles(profiles)
+    return (
+        f"engaged cruise heading={heading_deg:.0f}deg alt={altitude_ft:.0f}ft "
+        f"speed={speed_kt:.0f}kt{_format_displaced(displaced)}"
+    )
+
+
 def _pilot_reference_label(ctx: ToolContext) -> str:
     parts = []
     if ctx.config.airport.airport:
@@ -575,6 +605,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "engage_heading_hold": tool_engage_heading_hold,
     "engage_altitude_hold": tool_engage_altitude_hold,
     "engage_speed_hold": tool_engage_speed_hold,
+    "engage_cruise": tool_engage_cruise,
     "engage_pattern_fly": tool_engage_pattern_fly,
     "engage_takeoff": tool_engage_takeoff,
     "takeoff_checklist": tool_takeoff_checklist,
@@ -742,6 +773,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "Engage speed-hold on the speed axis. Displaces any other speed-axis profile.",
         {"speed_kt": {"type": "number", "description": "Target indicated airspeed in knots."}},
         ["speed_kt"],
+    ),
+    _fn_schema(
+        "engage_cruise",
+        "Atomically install heading_hold + altitude_hold + speed_hold in a single "
+        "tool call. Use this when transitioning out of a three-axis profile "
+        "(takeoff, pattern_fly) into a steady cross-country leg — engaging the "
+        "three single-axis holds separately briefly leaves the vertical and speed "
+        "axes uncovered between calls, while this installs them under one lock so "
+        "the control loop never sees an intermediate state. Displaces any "
+        "lateral-, vertical-, or speed-axis profile currently engaged (including "
+        "takeoff and pattern_fly, which own all three).",
+        {
+            "heading_deg": {"type": "number", "description": "Target true heading, 0-360."},
+            "altitude_ft": {"type": "number", "description": "Target altitude MSL in feet."},
+            "speed_kt": {"type": "number", "description": "Target indicated airspeed in knots."},
+        },
+        ["heading_deg", "altitude_ft", "speed_kt"],
     ),
     _fn_schema(
         "engage_pattern_fly",

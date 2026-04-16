@@ -84,6 +84,36 @@ class PilotCore:
             self.active_profiles = remaining
             return displaced
 
+    def engage_profiles(self, profiles: list[GuidanceProfile]) -> list[str]:
+        """Atomically engage multiple profiles under a single lock.
+
+        Each profile displaces any existing profile that owns an
+        overlapping axis. Because the whole operation runs inside one
+        ``with self._lock`` block, the control loop cannot observe an
+        intermediate state where some of the new profiles are engaged
+        and axes are orphaned — important when swapping a
+        ``pattern_fly`` (which owns all three axes) for three
+        single-axis holds.
+        """
+        with self._lock:
+            all_displaced: set[str] = set()
+            for profile in profiles:
+                displaced: list[str] = []
+                remaining: list[GuidanceProfile] = []
+                for existing in self.active_profiles:
+                    if existing.owns & profile.owns:
+                        displaced.append(existing.name)
+                    else:
+                        remaining.append(existing)
+                remaining.append(profile)
+                self.active_profiles = remaining
+                all_displaced.update(displaced)
+            # Don't report a profile as "displaced" if a later
+            # profile in the list is actually that same profile
+            # being re-engaged.
+            new_names = {p.name for p in profiles}
+            return sorted(all_displaced - new_names)
+
     def disengage_profile(self, name: str) -> list[str]:
         """Remove profile(s) with the given name. Re-adds idle profiles for orphaned axes.
 

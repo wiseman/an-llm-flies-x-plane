@@ -68,6 +68,38 @@ class ProfileEngagementTests(unittest.TestCase):
         names = set(self.pilot.list_profile_names())
         self.assertEqual(names, {"idle_lateral", "altitude_hold", "speed_hold"})
 
+    def test_engage_profiles_atomically_replaces_pattern_fly(self) -> None:
+        # Engaging heading_hold + altitude_hold + speed_hold via the
+        # multi-profile atomic call should displace pattern_fly and
+        # leave exactly the three holds active, with no intermediate
+        # state where some axes are orphaned.
+        self.pilot.engage_profile(PatternFlyProfile(self.config, self.pilot.runway_frame))
+        displaced = self.pilot.engage_profiles([
+            HeadingHoldProfile(heading_deg=90.0),
+            AltitudeHoldProfile(altitude_ft=3000.0),
+            SpeedHoldProfile(speed_kt=95.0),
+        ])
+        self.assertIn("pattern_fly", displaced)
+        self.assertEqual(
+            set(self.pilot.list_profile_names()),
+            {"heading_hold", "altitude_hold", "speed_hold"},
+        )
+
+    def test_engage_profiles_from_idle_displaces_each_idle(self) -> None:
+        displaced = self.pilot.engage_profiles([
+            HeadingHoldProfile(heading_deg=0.0),
+            AltitudeHoldProfile(altitude_ft=1500.0),
+            SpeedHoldProfile(speed_kt=80.0),
+        ])
+        self.assertEqual(
+            set(displaced),
+            {"idle_lateral", "idle_vertical", "idle_speed"},
+        )
+        self.assertEqual(
+            set(self.pilot.list_profile_names()),
+            {"heading_hold", "altitude_hold", "speed_hold"},
+        )
+
 
 class PatternFlyMethodTests(unittest.TestCase):
     def setUp(self) -> None:

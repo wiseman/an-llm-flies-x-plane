@@ -108,6 +108,11 @@ need to.
   when the operator/ATC explicitly says a direction; otherwise shortest-path.
 - altitude_hold: vertical altitude hold (TECS).
 - speed_hold: airspeed target.
+- cruise: atomic combo that installs heading_hold + altitude_hold + speed_hold
+  in one tool call. Use this to break out of takeoff or pattern_fly into a
+  steady cross-country leg — calling the three single-axis tools separately
+  briefly orphans the vertical/speed axes between calls, while engage_cruise
+  installs all three atomically under one lock.
 - takeoff: full-power roll, rotate at Vr, climb straight ahead at Vy on runway
   track. Owns all three axes. Does NOT auto-disengage; transition out by
   engaging another profile when stable (typically a few hundred feet AGL).
@@ -136,8 +141,8 @@ need to.
 - route_follow: stub, not yet implemented.
 
 Engaging a new profile auto-disengages any conflict on owned axes — this is how
-you transition from takeoff to cruise: just engage heading_hold + altitude_hold +
-speed_hold and the takeoff profile is displaced.
+you transition from takeoff to cruise: call engage_cruise(heading, altitude,
+speed) and the takeoff or pattern_fly profile is displaced in one atomic step.
 
 ## Incoming messages
 

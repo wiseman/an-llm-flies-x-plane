@@ -103,6 +103,50 @@ class ProfileToolsTests(unittest.TestCase):
         self.assertIn("heading_hold", ctx.pilot.list_profile_names())
         self.assertNotIn("idle_lateral", ctx.pilot.list_profile_names())
 
+    def test_engage_cruise_installs_three_holds_atomically(self) -> None:
+        ctx = make_ctx()
+        result = dispatch_tool(
+            make_call("engage_cruise", heading_deg=130.0, altitude_ft=2500.0, speed_kt=95.0),
+            ctx,
+        )
+        self.assertIn("engaged cruise", result)
+        names = set(ctx.pilot.list_profile_names())
+        self.assertEqual(names, {"heading_hold", "altitude_hold", "speed_hold"})
+
+    def test_engage_cruise_from_takeoff_displaces_three_axis_profile(self) -> None:
+        ctx = make_ctx()
+        dispatch_tool(make_call("engage_takeoff"), ctx)
+        self.assertEqual(ctx.pilot.list_profile_names(), ["takeoff"])
+        # Engage cruise atomically: the single tool call should
+        # displace takeoff and install all three holds, never leaving
+        # the vertical or speed axes uncovered mid-swap.
+        result = dispatch_tool(
+            make_call("engage_cruise", heading_deg=180.0, altitude_ft=3000.0, speed_kt=100.0),
+            ctx,
+        )
+        self.assertIn("displaced", result)
+        self.assertIn("takeoff", result)
+        names = set(ctx.pilot.list_profile_names())
+        self.assertEqual(names, {"heading_hold", "altitude_hold", "speed_hold"})
+        self.assertNotIn("takeoff", names)
+
+    def test_engage_cruise_carries_target_values(self) -> None:
+        from sim_pilot.core.profiles import AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile
+        ctx = make_ctx()
+        dispatch_tool(
+            make_call("engage_cruise", heading_deg=270.0, altitude_ft=3500.0, speed_kt=110.0),
+            ctx,
+        )
+        hh = ctx.pilot.find_profile("heading_hold")
+        ah = ctx.pilot.find_profile("altitude_hold")
+        sh = ctx.pilot.find_profile("speed_hold")
+        assert isinstance(hh, HeadingHoldProfile)
+        assert isinstance(ah, AltitudeHoldProfile)
+        assert isinstance(sh, SpeedHoldProfile)
+        self.assertAlmostEqual(hh.heading_deg, 270.0)
+        self.assertAlmostEqual(ah.altitude_ft, 3500.0)
+        self.assertAlmostEqual(sh.speed_kt, 110.0)
+
     def test_engage_pattern_fly_without_required_args_errors(self) -> None:
         ctx = make_ctx()
         result = dispatch_tool(make_call("engage_pattern_fly"), ctx)
