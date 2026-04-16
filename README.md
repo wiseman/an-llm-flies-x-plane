@@ -2,6 +2,8 @@
 
 An LLM-driven autopilot for X-Plane 12 that flies a deterministic traffic pattern while an LLM handles ATC communication, mission decisions, and high-level pilot intent.
 
+[![Demo video](https://img.youtube.com/vi/5Z6APyCtDTM/maxresdefault.jpg)](https://www.youtube.com/watch?v=5Z6APyCtDTM)
+
 ## Design
 
 The flight control loop is deterministic and runs at 10 Hz -- the LLM never touches elevator, aileron, rudder, or throttle directly. Instead, the LLM interprets operator and ATC messages into high-level actions (take off, fly a heading, enter the pattern at a specific runway, extend downwind, go around, execute a touch-and-go) by calling tools that mutate the pilot core's profile stack. Composable guidance profiles own axes (lateral, vertical, speed) and are merged each tick into a single set of actuator commands. A `PatternFlyProfile` wraps the full phase machine (TAKEOFF_ROLL through TAXI_CLEAR, plus GO_AROUND) and handles the entire traffic pattern autonomously once engaged. Single-axis profiles (`HeadingHoldProfile`, `AltitudeHoldProfile`, `SpeedHoldProfile`) can be composed for cross-country cruise legs. The X-Plane bridge communicates via the built-in web API on port 8086 (REST for setup, WebSocket for real-time dataref reads and writes).
