@@ -13,7 +13,7 @@ The flight control loop is deterministic and runs at 10 Hz -- the LLM never touc
 | `get_status` | JSON snapshot of aircraft state, phase, and active profiles |
 | `sleep` | End the LLM's turn; control loop keeps flying active profiles |
 | `engage_heading_hold` | Lateral heading hold (optional forced turn direction) |
-| `engage_altitude_hold` | Vertical altitude hold via TECS |
+| `engage_altitude_hold` | Vertical altitude hold via TECS (Total Energy Control System) |
 | `engage_speed_hold` | Airspeed target hold |
 | `engage_cruise` | Atomic combo: heading + altitude + speed hold in one call |
 | `engage_pattern_fly` | Full deterministic pattern pilot anchored at a specific runway |
