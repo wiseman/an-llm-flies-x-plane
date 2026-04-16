@@ -1,101 +1,57 @@
 # xplane-pilot
 
-The repo now has two runnable paths:
+An LLM-driven autopilot for X-Plane 12 that flies a deterministic traffic pattern while an LLM handles ATC communication, mission decisions, and high-level pilot intent.
 
-- the original deterministic simple simulator for fast iteration and tests
-- a live X-Plane MVP loop that reads aircraft state from X-Plane 12's built-in web API, runs the deterministic pilot core, writes actuator commands back to X-Plane, and sends ATC/operator text through an OpenAI model as structured pilot intents
+## Design
 
-The control stack remains deterministic. The LLM only interprets high-level instructions such as `extend_downwind`, `turn_base_now`, `maintain_speed`, `join_pattern`, and `go_around`.
+The flight control loop is deterministic and runs at 10 Hz -- the LLM never touches elevator, aileron, rudder, or throttle directly. Instead, the LLM interprets operator and ATC messages into high-level actions (take off, fly a heading, enter the pattern at a specific runway, extend downwind, go around, execute a touch-and-go) by calling tools that mutate the pilot core's profile stack. Composable guidance profiles own axes (lateral, vertical, speed) and are merged each tick into a single set of actuator commands. A `PatternFlyProfile` wraps the full phase machine (TAKEOFF_ROLL through TAXI_CLEAR, plus GO_AROUND) and handles the entire traffic pattern autonomously once engaged. Single-axis profiles (`HeadingHoldProfile`, `AltitudeHoldProfile`, `SpeedHoldProfile`) can be composed for cross-country cruise legs. The X-Plane bridge communicates via the built-in web API on port 8086 (REST for setup, WebSocket for real-time dataref reads and writes).
 
-## Test suite
+## Tools
 
-Run the unit tests with:
+| Tool | Description |
+|------|-------------|
+| `get_status` | JSON snapshot of aircraft state, phase, and active profiles |
+| `sleep` | End the LLM's turn; control loop keeps flying active profiles |
+| `engage_heading_hold` | Lateral heading hold (optional forced turn direction) |
+| `engage_altitude_hold` | Vertical altitude hold via TECS |
+| `engage_speed_hold` | Airspeed target hold |
+| `engage_cruise` | Atomic combo: heading + altitude + speed hold in one call |
+| `engage_pattern_fly` | Full deterministic pattern pilot anchored at a specific runway |
+| `engage_takeoff` | Takeoff sequence: full power, rotate at Vr, climb at Vy |
+| `takeoff_checklist` | Pre-takeoff readiness check (parking brake, flaps, gear, etc.) |
+| `disengage_profile` | Remove a named profile; idle profiles fill orphaned axes |
+| `list_profiles` | List currently active profile names |
+| `extend_downwind` | Push the base-turn point further out on the downwind leg |
+| `turn_base_now` | Force an immediate base turn (rebuilds base leg at current position) |
+| `go_around` | Command an immediate go-around |
+| `execute_touch_and_go` | Arm a touch-and-go: next touchdown skips braking and re-takes off |
+| `cleared_to_land` | Record a landing clearance |
+| `join_pattern` | Acknowledge a pattern-join instruction |
+| `tune_radio` | Set a COM radio frequency |
+| `broadcast_on_radio` | Transmit a message on a COM radio |
+| `set_parking_brake` | Engage or release the parking brake |
+| `sql_query` | Read-only SQL against the worldwide runway/airport database (DuckDB) |
+
+## Running
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
+# Run the offline deterministic simulator (no X-Plane needed)
+uv run python -m sim_pilot
+
+# Run with a crosswind and write CSV + SVG plots
+uv run python -m sim_pilot --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
+
+# Connect to a live X-Plane 12 instance with the interactive TUI
+uv run python -m sim_pilot --backend xplane --interactive-atc
+
+# Send an initial instruction to the LLM at startup
+uv run python -m sim_pilot --backend xplane --interactive-atc \
+  --atc-message "take off, fly one lap in the pattern, then land"
+
+# Run tests
 uv run python -m unittest discover -s tests -v
 ```
 
-## Simple simulator
-
-Run the demo scenario with:
-
-```bash
-uv run python -m sim_pilot
-```
-
-Run a 10 kt crosswind case and write a CSV log with pitch, altitude, throttle, speed, heading, and bank:
-
-```bash
-uv run python -m sim_pilot --crosswind-kt 10 --log-csv output/flight_log.csv
-```
-
-Generate SVG plots for altitude, speed, bank, pitch, throttle, heading, a phase-marked time axis, and a phase-colored runway-frame ground path:
-
-```bash
-uv run python -m sim_pilot --crosswind-kt 10 --plots-dir output/plots
-```
-
-The ground-path SVG is now north-up world coordinates rather than runway-frame coordinates.
-
-You can also label the run explicitly:
-
-```bash
-uv run python -m sim_pilot --scenario-name pattern_debug --log-csv output/flight_log.csv
-```
-
-## Live X-Plane MVP
-
-Requirements:
-
-- X-Plane 12.1.1 or later running on the host you point the bridge at (the built-in web server listens on port 8086 by default)
-- an OpenAI API key in `OPENAI_API_KEY`
-- a real runway threshold latitude/longitude for the runway you want to fly
-
-Important:
-
-- the default `KTEST` config is synthetic and meant for the local simulator
-- for a live X-Plane run, override the airport/runway metadata to match the real runway you are using
-- the live bridge does not yet emit CSV logs or SVG plots
-
-Example live run:
-
-```bash
-uv run python -m sim_pilot \
-  --backend xplane \
-  --airport KXYZ \
-  --runway-id 36 \
-  --runway-course-deg 0 \
-  --field-elevation-ft 500 \
-  --threshold-lat-deg 34.0000 \
-  --threshold-lon-deg -118.0000 \
-  --llm-model gpt-5-mini \
-  --interactive-atc
-```
-
-If the aircraft is already sitting on the runway and you want the pilot to bootstrap from the current X-Plane state, use:
-
-```bash
-uv run python -m sim_pilot \
-  --backend xplane \
-  --takeoff-from-here \
-  --airport KSEA
-```
-
-`--takeoff-from-here` is an alias for `--bootstrap-from-sim`. It probes the current aircraft latitude, longitude, heading, and field elevation from X-Plane, treats the current aircraft position as the runway reference, and starts the deterministic pilot from there.
-
-You can also inject startup messages through the LLM without using stdin:
-
-```bash
-uv run python -m sim_pilot \
-  --backend xplane \
-  --airport KXYZ \
-  --runway-id 36 \
-  --runway-course-deg 0 \
-  --field-elevation-ft 500 \
-  --threshold-lat-deg 34.0000 \
-  --threshold-lon-deg -118.0000 \
-  --atc-message "Join left traffic runway 36" \
-  --atc-message "Extend downwind, I'll call your base"
-```
-
-While the live runner is active it will print periodic status lines with the current phase, altitude AGL, indicated airspeed, groundspeed, heading, and runway-frame position.
+The live backend requires X-Plane 12.1.1+ with the web API enabled on port 8086 (Settings > Data Output > Web Server). The `--runway-csv-path` flag points to an [ourairports](https://ourairports.com/data/) `runways.csv` file (defaults to `~/data/runways.csv`).
