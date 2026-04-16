@@ -429,6 +429,28 @@ class PatternFlyProfile:
         self.cleared_to_land_runway = runway_id or self.runway_frame.runway.id
 
     def contribute(self, state: AircraftState, dt: float, pilot: "PilotCore") -> ProfileContribution:
+        # When turn_base_now fires while on DOWNWIND, rebuild the base
+        # leg so it starts at the aircraft's *current* runway_x instead
+        # of whatever base_turn_x the pattern geometry was last built
+        # with. Without this, an extend_downwind(big_number) followed
+        # by a later turn_base_now would leave the pre-computed base
+        # leg way behind the aircraft, and L1's fallback "direct to
+        # leg start" would turn the plane *further upwind* toward the
+        # stale leg start instead of toward the runway.
+        if (
+            self._turn_base_trigger
+            and self.phase is FlightPhase.DOWNWIND
+            and state.runway_x_ft is not None
+        ):
+            # Solve base_turn_x_ft = -(downwind_offset + extension) for
+            # extension such that base_turn_x_ft == state.runway_x_ft.
+            downwind_offset_ft = self.config.pattern.downwind_offset_ft
+            self.pattern_extension_ft = max(
+                0.0,
+                -float(state.runway_x_ft) - downwind_offset_ft,
+            )
+            self.pattern = self._build_pattern_geometry()
+
         self.route_manager.advance_if_needed(state.position_ft)
         safety_status = self.safety_monitor.evaluate(state, self.phase)
         previous_phase = self.phase

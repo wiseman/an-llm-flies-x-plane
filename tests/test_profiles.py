@@ -132,6 +132,96 @@ class PatternFlyMethodTests(unittest.TestCase):
         self.profile.cleared_to_land("16L")
         self.assertEqual(self.profile.cleared_to_land_runway, "16L")
 
+    def _downwind_state(self, *, runway_x_ft: float):
+        # Aircraft on downwind, wings level, heading 180° (downwind on
+        # runway 36 left traffic for the default KTEST config).
+        from sim_pilot.core.types import AircraftState, Vec2, KT_TO_FPS, heading_to_vector
+        return AircraftState(
+            t_sim=0.0,
+            dt=0.2,
+            position_ft=self.pilot.runway_frame.to_world_frame(
+                Vec2(runway_x_ft, self.profile.pattern.downwind_y_ft)
+            ),
+            alt_msl_ft=self.config.pattern_altitude_msl_ft,
+            alt_agl_ft=self.config.pattern.altitude_agl_ft,
+            pitch_deg=0.0,
+            roll_deg=0.0,
+            heading_deg=180.0,
+            track_deg=180.0,
+            p_rad_s=0.0,
+            q_rad_s=0.0,
+            r_rad_s=0.0,
+            ias_kt=80.0,
+            tas_kt=80.0,
+            gs_kt=80.0,
+            vs_fpm=0.0,
+            ground_velocity_ft_s=heading_to_vector(180.0, 80.0 * KT_TO_FPS),
+            flap_index=10,
+            gear_down=True,
+            on_ground=False,
+            throttle_pos=0.5,
+            runway_id=self.config.airport.runway.id,
+            runway_dist_remaining_ft=None,
+            runway_x_ft=runway_x_ft,
+            runway_y_ft=self.profile.pattern.downwind_y_ft,
+            centerline_error_ft=0.0,
+            threshold_abeam=False,
+            distance_to_touchdown_ft=None,
+            stall_margin=1.5,
+        )
+
+    def test_turn_base_now_after_extended_downwind_anchors_base_at_current_position(self) -> None:
+        # Simulate an ATC "extend downwind, I'll call your base" flow:
+        # 1) extend_downwind(big) pushes base_turn_x way out.
+        # 2) Aircraft continues flying downwind.
+        # 3) ATC calls base at a position that's not at the extended
+        #    base_turn_x. turn_base_now() should rebuild the base leg
+        #    so it starts at the *current* runway_x — otherwise L1
+        #    would fall back to direct-to the stale pre-computed leg
+        #    start and fly the plane further upwind, away from the
+        #    runway.
+        self.profile.phase = FlightPhase.DOWNWIND
+        self.profile.extend_downwind(10000.0)
+        # Original nominal base_turn_x = -downwind_offset = -3500.
+        # After extend(10000), base_turn_x = -13500.
+        self.assertAlmostEqual(self.profile.pattern.base_turn_x_ft, -13500.0, places=1)
+        # Aircraft currently at rx = -8000 (downwind, past nominal
+        # turn but nowhere near the extended turn).
+        state = self._downwind_state(runway_x_ft=-8000.0)
+        self.profile.turn_base_now()
+        # Contribute() should rebuild base leg at current rx and then
+        # transition to BASE on the same tick.
+        self.profile.contribute(state, 0.2, self.pilot)
+        self.assertEqual(self.profile.phase, FlightPhase.BASE)
+        # Base leg now starts at the current plane position (rx=-8000),
+        # not at the old extended -13500.
+        self.assertAlmostEqual(self.profile.pattern.base_turn_x_ft, -8000.0, places=1)
+        base_start_runway = self.pilot.runway_frame.to_runway_frame(
+            self.profile.pattern.base_leg.start_ft
+        )
+        self.assertAlmostEqual(base_start_runway.x, -8000.0, delta=1.0)
+
+    def test_turn_base_now_before_nominal_point_leaves_pattern_geometry_alone(self) -> None:
+        # If ATC calls base *before* the aircraft reaches the nominal
+        # base turn point (rx=-3500 for the default pattern), the
+        # rebuild logic solves for negative extension, which we clamp
+        # at 0. The base_turn_x stays at the nominal value — the
+        # aircraft turns slightly early via the trigger, and L1 on
+        # the nominal base leg captures it cleanly because it's only
+        # a short distance ahead.
+        self.profile.phase = FlightPhase.DOWNWIND
+        original_base_turn_x = self.profile.pattern.base_turn_x_ft
+        state = self._downwind_state(runway_x_ft=-2000.0)  # short of nominal -3500
+        self.profile.turn_base_now()
+        self.profile.contribute(state, 0.2, self.pilot)
+        # pattern_extension_ft should clamp at 0, leaving base_turn_x
+        # at the nominal value.
+        self.assertEqual(self.profile.pattern_extension_ft, 0.0)
+        self.assertAlmostEqual(
+            self.profile.pattern.base_turn_x_ft, original_base_turn_x, places=1
+        )
+        self.assertEqual(self.profile.phase, FlightPhase.BASE)
+
 
 class PatternFlyGuidanceTests(unittest.TestCase):
     """Regression tests for guidance emitted per phase. Exercises the
