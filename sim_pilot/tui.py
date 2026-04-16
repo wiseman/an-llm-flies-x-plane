@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from sim_pilot.llm.responses_client import CacheStats
 
 
-STATUS_PANE_HEIGHT = 11
+STATUS_PANE_HEIGHT = 12
 RADIO_PANE_HEIGHT = 8
 
 _THR_BAR_WIDTH = 8
@@ -263,6 +263,12 @@ def format_snapshot_styled(
         f.append(("class:dim", f"{'\u2014':>7}"))
     f.append(("", "\n"))
 
+    # groundspeed
+    f.append(("class:lbl", "  groundspeed    "))
+    f.append(("class:val", f"{state.gs_kt:10.0f}"))
+    f.append(("class:val", f"{' kt':<8}"))
+    f.append(("", "\n"))
+
     # vertical speed
     f.append(("class:lbl", "  vertical       "))
     f.append(("class:val", f"{state.vs_fpm:+10.0f}"))
@@ -408,7 +414,10 @@ def run_tui(
             input_queue.put(IncomingMessage(source=source, text=payload))
             if heartbeat_pump is not None:
                 heartbeat_pump.record_user_input()
-            bus.push_log(f"[{source}] {payload}")
+            # ATC messages are echoed to the radio pane by the conversation
+            # loop when it processes the queued message — don't duplicate here.
+            if source != "atc":
+                bus.push_log(f"[{source}] {payload}")
         input_buffer.reset()
 
     @bindings.add("c-t")
@@ -430,6 +439,8 @@ def run_tui(
     )
 
     def _set_buffer_text_pin_end(target: Buffer, text: str) -> None:
+        # prompt_toolkit renders literal tabs as ^I; expand to spaces.
+        text = text.expandtabs(4)
         if target.text == text:
             return
         target.set_document(

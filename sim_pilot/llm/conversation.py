@@ -418,7 +418,7 @@ def _handle_message(
         _emit(bus, f"[heartbeat] {message.text}")
     else:
         conversation.append_atc_message(message.text)
-        _emit(bus, f"[atc] {message.text}")
+        _emit_radio(bus, f"[atc] {message.text}")
     conversation.compact_if_needed()
 
     deadline = time.monotonic() + total_wall_budget_s
@@ -463,6 +463,13 @@ def _handle_message(
 def _emit(bus: SimBus | None, text: str) -> None:
     if bus is not None:
         bus.push_log(text)
+    else:
+        print(text, flush=True)
+
+
+def _emit_radio(bus: SimBus | None, text: str) -> None:
+    if bus is not None:
+        bus.push_radio(text)
     else:
         print(text, flush=True)
 
