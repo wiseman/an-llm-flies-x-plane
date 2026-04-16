@@ -108,8 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runway-csv-path",
         type=Path,
-        default=Path.home() / "data" / "runways.csv",
-        help="Path to the runway/airport CSV that the LLM's sql_query tool reads via DuckDB (with the spatial extension loaded). The CSV is read directly — no separate build step.",
+        default=Path(__file__).resolve().parent.parent / "data" / "runways.csv",
+        help="Path to the runway/airport CSV that the LLM's sql_query tool reads via DuckDB (with the spatial extension loaded). Defaults to data/runways.csv in the repo root.",
     )
     parser.add_argument(
         "--log-file",

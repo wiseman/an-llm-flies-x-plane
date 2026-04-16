@@ -60,7 +60,7 @@ The live backend requires:
 
 - **X-Plane 12.1.1+** with the web API enabled on port 8086 (Settings > Data Output > Web Server)
 - **An OpenAI API key** for the LLM worker that interprets ATC/operator messages
-- **A runways CSV** from [ourairports](https://ourairports.com/data/) (defaults to `~/data/runways.csv`; override with `--runway-csv-path`)
+- **A runways CSV** — included in the repo at `data/runways.csv` (sourced from [ourairports](https://ourairports.com/data/); override with `--runway-csv-path`)
 
 Create a `.env` file in the project root (it is gitignored):
 
@@ -74,4 +74,4 @@ Or export the variable directly:
 export OPENAI_API_KEY=sk-...
 ```
 
-The offline deterministic simulator (`--backend simple`, the default) does not require an API key or X-Plane.
+The offline deterministic simulator (`--backend simple`, the default) does not require an API key or X-Plane. The runway database (`data/runways.csv`) is included in the repo and used automatically.
