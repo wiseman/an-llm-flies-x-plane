@@ -24,6 +24,7 @@ from sim_pilot.guidance.runway_geometry import RunwayFrame
 from sim_pilot.sim.datarefs import (
     COM1_FREQUENCY_HZ_833,
     COM2_FREQUENCY_HZ_833,
+    FLAP_HANDLE_REQUEST_RATIO,
     LATITUDE_DEG,
     LONGITUDE_DEG,
     PARKING_BRAKE_RATIO,
@@ -378,9 +379,8 @@ def tool_takeoff_checklist(ctx: ToolContext) -> str:
         lines.append(f"  [OK]     flaps: {state.flap_index} deg")
     else:
         lines.append(
-            f"  [ACTION] flaps: {state.flap_index} deg — set 0 or 10 for normal takeoff "
-            f"(tool: currently none — leave flaps alone or change via your flight-controls "
-            f"of choice if you add a flap tool)"
+            f"  [ACTION] flaps: {state.flap_index} deg — call set_flaps(degrees=10) or "
+            f"set_flaps(degrees=0) for normal takeoff"
         )
         action_needed = True
 
@@ -547,6 +547,24 @@ def tool_set_parking_brake(ctx: ToolContext, engaged: bool) -> str:
     return "parking brake engaged" if engaged else "parking brake released"
 
 
+_VALID_FLAP_SETTINGS = (0, 10, 20, 30)
+
+
+def tool_set_flaps(ctx: ToolContext, degrees: int) -> str:
+    if ctx.bridge is None:
+        return "error: no X-Plane bridge available (running in simple backend?)"
+    degrees = int(degrees)
+    if degrees not in _VALID_FLAP_SETTINGS:
+        return f"error: invalid flap setting {degrees} — valid settings are {', '.join(str(s) for s in _VALID_FLAP_SETTINGS)}"
+    ratio = degrees / 30.0
+    ctx.bridge.write_dataref_values({FLAP_HANDLE_REQUEST_RATIO.name: ratio})
+    warning = ""
+    pattern = _find_pattern_profile(ctx)
+    if pattern is not None:
+        warning = " (note: pattern_fly is active and manages flaps per phase — it may override this setting on the next tick)"
+    return f"flaps set to {degrees}\u00b0{warning}"
+
+
 def tool_broadcast_on_radio(ctx: ToolContext, radio: str, message: str) -> str:
     key = radio.lower()
     if key not in {"com1", "com2"}:
@@ -637,6 +655,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     "tune_radio": tool_tune_radio,
     "broadcast_on_radio": tool_broadcast_on_radio,
     "set_parking_brake": tool_set_parking_brake,
+    "set_flaps": tool_set_flaps,
     "sql_query": tool_sql_query,
 }
 
@@ -942,6 +961,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "Engage or release the parking brake. Unlike the toe brakes, the parking brake holds its state without continuous input, so this is the right tool for 'set the brake and hold it'.",
         {"engaged": {"type": "boolean", "description": "True to engage (set) the parking brake, false to release it."}},
         ["engaged"],
+    ),
+    _fn_schema(
+        "set_flaps",
+        "Set the flap handle position. Valid settings for the C172 are 0, 10, 20, or 30 degrees. Note: when pattern_fly is active, it manages flaps automatically per flight phase and will override this setting on the next tick. Use this tool when flying with single-axis profiles (heading_hold, altitude_hold, speed_hold) or during ground ops.",
+        {"degrees": {"type": "integer", "description": "Flap setting in degrees: 0, 10, 20, or 30."}},
+        ["degrees"],
     ),
     _fn_schema(
         "sql_query",

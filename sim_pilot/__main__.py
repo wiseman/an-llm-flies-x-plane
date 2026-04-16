@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 from typing import Sequence
@@ -155,7 +156,24 @@ def resolve_scenario_name(explicit_name: str | None, wind_vector: Vec2) -> str:
     return f"takeoff_to_pattern_landing_wind_x_{wind_vector.x:.1f}_y_{wind_vector.y:.1f}_kt"
 
 
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from a .env file into os.environ (no dependency)."""
+    if not path.is_file():
+        return
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if key:
+                os.environ.setdefault(key, value)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
+    _load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     args = build_parser().parse_args(argv)
     config = load_default_config_bundle()
     if args.backend == "xplane":
