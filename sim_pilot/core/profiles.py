@@ -846,12 +846,7 @@ class PatternFlyProfile:
             # the wheels are down, progressively harder as speed
             # bleeds off. The old 0.2/0.45 split was too gentle and
             # left long rollouts on short runways.
-            if state.gs_kt > 40.0:
-                brakes = 0.5
-            elif state.gs_kt > 20.0:
-                brakes = 0.8
-            else:
-                brakes = 1.0
+            brakes = 1.0
             return GuidanceTargets(
                 lateral_mode=LateralMode.ROLLOUT_CENTERLINE,
                 vertical_mode=VerticalMode.PITCH_HOLD,
