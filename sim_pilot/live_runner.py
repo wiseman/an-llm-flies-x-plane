@@ -306,6 +306,7 @@ def run_live_xplane(config: ConfigBundle, runtime: LiveRunConfig) -> None:
                 stop_event=control_stop,
                 pilot=pilot,
                 heartbeat_pump=heartbeat_pump,
+                cache_stats=llm_client.cache_stats,
             )
         finally:
             control_stop.set()

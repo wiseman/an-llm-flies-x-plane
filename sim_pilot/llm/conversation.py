@@ -311,7 +311,12 @@ class Conversation:
         summary_item = _system_item(
             f"Active profiles: {active_profiles_summary}" if active_profiles_summary else "Active profiles: (none)"
         )
-        return list(self.pinned_items) + [summary_item] + list(self.rotating_items)
+        # The summary is dynamic (changes whenever profiles change), so it
+        # goes at the END of the input — after pinned items and conversation
+        # history.  OpenAI's prompt cache matches by exact prefix: putting
+        # dynamic content in the middle would invalidate the cache for all
+        # conversation history that follows it.
+        return list(self.pinned_items) + list(self.rotating_items) + [summary_item]
 
     def total_char_count(self) -> int:
         return sum(

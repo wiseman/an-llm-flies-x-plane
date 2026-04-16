@@ -91,11 +91,15 @@ class ConversationStateTests(unittest.TestCase):
         conv = Conversation(system_prompt="sys")
         conv.append_operator_message("hi")
         items = conv.build_input(active_profiles_summary="heading_hold, idle_vertical, idle_speed")
+        # Pinned system prompt is first (stable prefix for cache hits).
         self.assertEqual(items[0]["role"], "system")
-        self.assertEqual(items[1]["role"], "system")
-        self.assertIn("Active profiles", items[1]["content"][0]["text"])
-        self.assertIn("heading_hold", items[1]["content"][0]["text"])
-        self.assertEqual(items[2]["role"], "user")
+        # Conversation history comes next (also part of stable prefix).
+        self.assertEqual(items[1]["role"], "user")
+        # Dynamic profiles summary is LAST so it doesn't break the cache
+        # prefix when active profiles change between requests.
+        self.assertEqual(items[2]["role"], "system")
+        self.assertIn("Active profiles", items[2]["content"][0]["text"])
+        self.assertIn("heading_hold", items[2]["content"][0]["text"])
 
 
 class CompactionTests(unittest.TestCase):

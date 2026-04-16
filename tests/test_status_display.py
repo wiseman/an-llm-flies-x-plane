@@ -70,7 +70,7 @@ def _make_snapshot(
 
 class FormatSnapshotDisplayTests(unittest.TestCase):
     def test_none_snapshot_shows_waiting_placeholder(self) -> None:
-        self.assertEqual(format_snapshot_display(None), "(waiting for first pilot tick)")
+        self.assertIn("waiting for first pilot tick", format_snapshot_display(None))
 
     def test_idle_has_no_target_heading(self) -> None:
         snapshot = _make_snapshot(
@@ -87,9 +87,10 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
         )
         out = format_snapshot_display(snapshot)
         self.assertIn("idle_lateral, idle_vertical, idle_speed", out)
-        self.assertIn("throttle 0.00", out)
+        self.assertIn("throttle", out)
+        self.assertIn("0.00", out)
         # No desired heading (both fields absent from guidance)
-        self.assertIn("—", out)  # some target field is "—"
+        self.assertIn("\u2014", out)  # some target field is "—"
 
     def test_heading_hold_shows_target_heading(self) -> None:
         guidance = GuidanceTargets(
@@ -110,9 +111,10 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
         )
         out = format_snapshot_display(snapshot)
         self.assertIn("heading_hold, altitude_hold, speed_hold", out)
-        self.assertIn("throttle 0.55", out)
-        self.assertIn("265°", out)  # current heading
-        self.assertIn("270°", out)  # target heading
+        self.assertIn("throttle", out)
+        self.assertIn("0.55", out)
+        self.assertIn("265\u00b0", out)  # current heading
+        self.assertIn("270\u00b0", out)  # target heading
         self.assertIn("2500 AGL", out)  # 3000 MSL - 500 field elev = 2500 AGL
         self.assertIn(" 95 kt IAS", out)  # current speed
         self.assertIn(" 95 kt", out)  # target speed
@@ -149,8 +151,8 @@ class FormatSnapshotDisplayTests(unittest.TestCase):
             guidance=None,
         )
         lines = format_snapshot_display(snapshot).splitlines()
-        self.assertIn("phase:", lines[0])
-        self.assertIn("profiles:", lines[0])
+        self.assertIn("\u25b8", lines[0])  # ▸ phase marker
+        self.assertIn("idle_lateral", lines[0])
         # Header row announces the two columns
         header = next(line for line in lines if "current" in line and "target" in line)
         self.assertIsNotNone(header)

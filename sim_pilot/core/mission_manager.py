@@ -43,6 +43,9 @@ class StatusSnapshot:
     last_commands: ActuatorCommands
     last_guidance: GuidanceTargets | None = None
     go_around_reason: str | None = None
+    airport_ident: str | None = None
+    runway_id: str | None = None
+    field_elevation_ft: float | None = None
 
 
 @dataclass
@@ -164,9 +167,16 @@ class PilotCore:
             guidance = self._compose_guidance(state, dt)
             commands = self._commands_from_guidance(state, guidance)
             go_around_reason: str | None = None
+            airport_ident: str | None = None
+            runway_id: str | None = None
+            field_elevation_ft: float | None = None
             for profile in self.active_profiles:
-                if isinstance(profile, PatternFlyProfile) and profile.last_go_around_reason is not None:
-                    go_around_reason = profile.last_go_around_reason
+                if isinstance(profile, PatternFlyProfile):
+                    if profile.last_go_around_reason is not None:
+                        go_around_reason = profile.last_go_around_reason
+                    airport_ident = profile.config.airport.airport
+                    runway_id = profile.runway_frame.runway.id
+                    field_elevation_ft = profile.config.airport.field_elevation_ft
                     break
             self.latest_snapshot = StatusSnapshot(
                 t_sim=state.t_sim,
@@ -176,6 +186,9 @@ class PilotCore:
                 last_commands=commands,
                 last_guidance=guidance,
                 go_around_reason=go_around_reason,
+                airport_ident=airport_ident,
+                runway_id=runway_id,
+                field_elevation_ft=field_elevation_ft,
             )
             return state, commands
 
